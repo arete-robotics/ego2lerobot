@@ -1,0 +1,9 @@
+ego2lerobot
+Copyright 2026 Zhao Liu / Quietbit Labs
+
+This product downloads and runs third-party models that are not included in this repository:
+- MediaPipe Hand Landmarker, Copyright Google LLC, Apache License 2.0
+- Qwen3-VL (optional, for captions), Copyright Alibaba Cloud, Apache License 2.0
+
+The sample image assets/demo.jpg shows frames from Egocentric-10K by Build AI
+(https://huggingface.co/datasets/builddotai/Egocentric-10K), Apache License 2.0.

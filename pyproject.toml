@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ego2lerobot"
+version = "0.1.0"
+description = "Turn first-person video into LeRobot datasets: hand keypoints, wrist and grip actions, language instructions"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Zhao Liu" }, { name = "Quietbit Labs" }]
+keywords = ["robotics", "lerobot", "egocentric", "hand-pose", "imitation-learning", "dataset"]
+dependencies = ["lerobot[dataset]>=0.4", "mediapipe>=0.10", "av", "numpy", "pillow"]
+
+[project.optional-dependencies]
+caption = ["mlx-vlm>=0.3"]
+test = ["pytest"]
+
+[project.scripts]
+ego2lerobot = "ego2lerobot.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ChizkiyahuOhayon/ego2lerobot"
+Sample = "https://huggingface.co/datasets/quietbit/egocentric-10k-actions-sample"
