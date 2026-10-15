@@ -9,7 +9,7 @@ description = "Turn first-person video into LeRobot datasets: hand keypoints, wr
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
-authors = [{ name = "Zhao Liu" }, { name = "Quietbit Labs" }]
+authors = [{ name = "Zhao Liu" }, { name = "Arete Robotics" }]
 keywords = ["robotics", "lerobot", "egocentric", "hand-pose", "imitation-learning", "dataset"]
 dependencies = ["lerobot[dataset]>=0.4", "mediapipe>=0.10", "av", "numpy", "pillow"]
 
@@ -22,4 +22,4 @@ ego2lerobot = "ego2lerobot.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ChizkiyahuOhayon/ego2lerobot"
-Sample = "https://huggingface.co/datasets/quietbit/egocentric-10k-actions-sample"
+Sample = "https://huggingface.co/datasets/arete-robotics/egocentric-10k-actions-sample"

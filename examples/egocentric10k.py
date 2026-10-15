@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild a sample like quietbit/egocentric-10k-actions-sample from Egocentric-10K.
+"""Rebuild a sample like arete-robotics/egocentric-10k-actions-sample from Egocentric-10K.
 
 Egocentric-10K is gated: accept its terms on Hugging Face and run `hf auth login` first.
 For each of N factories, the first video of one worker's first shard is streamed (no 1 GB download), then

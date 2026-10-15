@@ -4,7 +4,7 @@
 
 ![Six factory tasks from Egocentric-10K, labelled automatically](assets/demo.jpg)
 
-**Sample output:** [quietbit/egocentric-10k-actions-sample](https://huggingface.co/datasets/quietbit/egocentric-10k-actions-sample) has 211 episodes from 28 factories in [Egocentric-10K](https://huggingface.co/datasets/builddotai/Egocentric-10K), labelled with this tool on one Mac mini in about two hours.
+**Sample output:** [arete-robotics/egocentric-10k-actions-sample](https://huggingface.co/datasets/arete-robotics/egocentric-10k-actions-sample) has 211 episodes from 28 factories in [Egocentric-10K](https://huggingface.co/datasets/builddotai/Egocentric-10K), labelled with this tool on one Mac mini in about two hours.
 
 ## Install
 ```bash
@@ -62,7 +62,7 @@ Everything runs locally; no video leaves your machine.
 - **No MANO-based models** are used, because MANO is non-commercial.
 
 ## Labelling as a service
-If you would rather not run this yourself, or you need larger volumes, measured depth (iPhone LiDAR capture), custom segmentation or QA, [Quietbit Labs](https://huggingface.co/quietbit) will label your video. Send a few minutes of footage to **chizkiyahuohayon@gmail.com** and we will label it for free so you can judge the quality.
+If you would rather not run this yourself, or you need larger volumes, measured depth (iPhone LiDAR capture), custom segmentation or QA, [Arete Robotics](https://huggingface.co/arete-robotics) will label your video. Send a few minutes of footage to **chizkiyahuohayon@gmail.com** and we will label it for free so you can judge the quality.
 
 ## Cite
 ```bibtex
@@ -74,4 +74,4 @@ If you would rather not run this yourself, or you need larger volumes, measured 
 }
 ```
 
-*א · Quietbit Labs*
+*א · Arete Robotics*

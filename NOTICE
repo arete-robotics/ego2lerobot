@@ -1,5 +1,5 @@
 ego2lerobot
-Copyright 2026 Zhao Liu / Quietbit Labs
+Copyright 2026 Zhao Liu / Arete Robotics
 
 This product downloads and runs third-party models that are not included in this repository:
 - MediaPipe Hand Landmarker, Copyright Google LLC, Apache License 2.0
