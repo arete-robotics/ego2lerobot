@@ -62,7 +62,7 @@ Everything runs locally; no video leaves your machine.
 - **No MANO-based models** are used, because MANO is non-commercial.
 
 ## Labelling as a service
-If you would rather not run this yourself, or you need larger volumes, measured depth (iPhone LiDAR capture), custom segmentation or QA, [Arete Robotics](https://huggingface.co/arete-robotics) will label your video. Send a few minutes of footage to **chizkiyahuohayon@gmail.com** and we will label it for free so you can judge the quality.
+If you would rather not run this yourself, or you need larger volumes, measured depth (iPhone LiDAR capture), custom segmentation or QA, [Arete Robotics](https://huggingface.co/arete-robotics) will label your video. Send a few minutes of footage to **hello@arete-robotics.com** and we will label it for free so you can judge the quality.
 
 ## Cite
 ```bibtex
