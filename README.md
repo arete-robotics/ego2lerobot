@@ -50,6 +50,30 @@ ds = LeRobotDataset("local/ego2lerobot", root="my_dataset")
 
 Everything runs locally; no video leaves your machine.
 
+## Stereo
+With a calibrated head-mounted stereo pair, `ego2lerobot stereo` measures hand depth by triangulation instead of estimating it from hand size.
+```bash
+ego2lerobot stereo left.mp4 right.mp4 --calib stereo.json --out my_dataset --imu imu.csv --preview previews/
+# one side-by-side file per clip, left camera in the left half
+ego2lerobot stereo --sbs pair1.mp4 pair2.mp4 --calib stereo.json --out my_dataset --caption
+```
+The calibration uses OpenCV conventions (pixels, metres; x right, y down, z forward):
+```json
+{"image_width": 1920, "image_height": 1080, "model": "pinhole",
+ "left":  {"fx": 1050, "fy": 1050, "cx": 960, "cy": 540, "distortion": [-0.28, 0.09, 0.001, -0.0005, -0.01]},
+ "right": {"fx": 1046, "fy": 1046, "cx": 955, "cy": 538, "distortion": [-0.27, 0.08, -0.0008, 0.0004, -0.012]},
+ "R": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "T": [-0.063, 0, 0]}
+```
+`R` and `T` map a point from the left camera frame to the right one, as returned by OpenCV's `stereoCalibrate`. For fisheye lenses set `"model": "fisheye"` and give `[k1, k2, k3, k4]`. For a pair that is already rectified, give `fx`, `fy`, `cx`, `cy` and `baseline` (metres) instead of `left`, `right`, `R` and `T`. The IMU file is a CSV with a header row whose first column `t` is seconds since the first video frame; the other columns are passed through.
+
+How it works: MediaPipe finds the hands in both views; the two hands are matched across views (both handedness pairings are tried); both views are rectified (Bouguet, as OpenCV's `stereoRectify`) and the 21 joints are triangulated in the left camera frame. A hand is rejected when its rows disagree after rectification (epipolar check), when it lies outside 0.1–1.5 m, or when its palm is not hand-sized; single joints with a large reprojection error are dropped. Spikes are removed, gaps up to 0.35 s are filled, joints are smoothed (Savitzky–Golay) and bone lengths are held near their median over the clip. Wrist pose, grip, episodes, captions and the LeRobot export then work as in `run`.
+
+The dataset stores `observation.images.left` and `.right`, per-camera intrinsics (`observation.intrinsics.left` / `.right`: fx, fy, cx, cy, d0–d4 at the stored size), `observation.extrinsics` (R row by row, then T), the 2D detections in each view, the triangulated `observation.hands.kp3d` with a per-joint `kp3d_status` (0 unknown, 1 triangulated, 2 filled across a gap), `ee`, `action` and, with `--imu`, `observation.imu` (the mean of the samples around each kept frame). `meta/calibration.json` holds the calibration, `meta/imu/` the raw IMU per episode, and `meta/triangulation_stats.json` the QC numbers: valid-triangulation rate, rejections by reason, median epipolar and reprojection errors, wrist depth range, and the same per frame and hand.
+
+`--rtmpose` adds RTMPose-m hand keypoints ([rtmlib](https://github.com/Tau-J/rtmlib), `pip install "ego2lerobot[rtmpose]"`) as a second model, fused with MediaPipe per joint. It is off by default: the code is Apache 2.0, but the published weights were trained on hand datasets that include FreiHAND and RHD, whose terms prohibit commercial use.
+
+Stereo limits: the two videos must start on the same frame (frames are paired by index); depth error grows with the square of distance (about 4 mm per pixel of disparity error at 0.5 m with f = 1000 px and a 6 cm baseline); 3D is relative to the head, because camera pose is not estimated; the IMU is passed through, not used.
+
 ## Limitations
 - **Depth comes from the average human hand size, not a depth sensor.** Expect errors of a few centimetres in distance.
 - Fast, blurred or gloved hands are often missed. Left and right are sometimes swapped when only one hand is visible.
@@ -59,6 +83,7 @@ Everything runs locally; no video leaves your machine.
 ## Licences
 - **Code:** Apache 2.0.
 - **Models it downloads:** MediaPipe Hand Landmarker (Apache 2.0) and Qwen3-VL (Apache 2.0). Both allow commercial use.
+- **Optional, off by default:** RTMPose-m hand weights (OpenMMLab), only with `stereo --rtmpose`. Their training data includes research-only datasets; check the terms before commercial use.
 - **No MANO-based models** are used, because MANO is non-commercial.
 
 ## Labelling as a service

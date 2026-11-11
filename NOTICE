@@ -4,6 +4,8 @@ Copyright 2026 Zhao Liu / Arete Robotics
 This product downloads and runs third-party models that are not included in this repository:
 - MediaPipe Hand Landmarker, Copyright Google LLC, Apache License 2.0
 - Qwen3-VL (optional, for captions), Copyright Alibaba Cloud, Apache License 2.0
+- RTMPose-m hand model (optional, off by default, `stereo --rtmpose`), OpenMMLab, via rtmlib (Apache License 2.0);
+  the weights were trained on datasets that include FreiHAND and RHD, which are licensed for research use only
 
 The sample image assets/demo.jpg shows frames from Egocentric-10K by Build AI
 (https://huggingface.co/datasets/builddotai/Egocentric-10K), Apache License 2.0.
