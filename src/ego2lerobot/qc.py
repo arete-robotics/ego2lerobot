@@ -364,7 +364,8 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
               "keypoints of a cut hand are partly guessed.",
               "- *Wrist distance*: from the average hand size, not a depth sensor; few-centimetre errors are normal.",
               "- *Jitter*: median distance of the wrist from the midpoint of its neighbouring frames (half the "
-              "frame-to-frame acceleration). It includes real motion, so compare deliveries rather than expect zero. "
+              f"frame-to-frame acceleration), in pixels of the delivered {o['image']} image and in millimetres in 3D. "
+              "It includes real motion, so compare deliveries rather than expect zero. "
               f"*Jumps* are frames where this exceeds {JUMP_M * 100:g} cm (often a depth jump or a left/right swap).",
               "- *Unusable ranges*: time outside kept episodes (with the reason it was not kept), and stretches inside "
               "episodes where no hand is usable.", ""]
