@@ -103,6 +103,8 @@ def run(args) -> None:
             segments, entry["boundaries"] = find_steps(track, judge, min_seconds, args.max_seconds, events=events)
             entry["steps"] = [{"start": s.start, "end": s.end, "hand_coverage": s.hand_coverage, "cuts": s.cuts}
                               for s in segments]
+            print(f"{video.name}: {len(entry['boundaries'])} candidate cuts checked, "
+                  f"{sum(bool(d.get('new_step')) for d in entry['boundaries'])} confirmed, {len(segments)} steps", flush=True)
             segments = [s for s in segments if s.hand_coverage >= args.min_coverage]
         else:
             segments = find_segments(track, min_seconds, args.max_seconds, min_coverage=args.min_coverage)
