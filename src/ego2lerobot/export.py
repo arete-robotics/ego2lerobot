@@ -111,10 +111,9 @@ def write_dataset(episodes: list[Episode], out: str | Path, repo_id: str, width:
         writer = None
         if every and n % every == 0:
             Path(preview_dir).mkdir(parents=True, exist_ok=True)
+            from .stereo_video import h264_stream  # OpenH264 (BSD) when available rather than x264 (GPL)
             container = av.open(str(Path(preview_dir) / f"episode_{len(meta):06d}.mp4"), "w")
-            stream = container.add_stream("h264", rate=fps)
-            stream.width, stream.height, stream.pix_fmt = width, height, "yuv420p"
-            writer = (container, stream)
+            writer = (container, h264_stream(container, fps, width, height))
         for i, image in frames_between(ep.video, ep.segment.start, ep.segment.end, ep.track.fps, width, height):
             if (i - ep.segment.start) % step:
                 continue
