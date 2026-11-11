@@ -162,6 +162,44 @@ def test_calibration_json(tmp_path):
         StereoRig.from_json(tmp_path / "swapped.json")
 
 
+def test_export_writes_both_views_calibration_stats_and_preview(tmp_path):
+    av = pytest.importorskip("av")
+    pytest.importorskip("lerobot")
+    from ego2lerobot.segments import Segment
+    from ego2lerobot.stereo_export import Imu, StereoEpisode, write_stereo_dataset
+    from ego2lerobot.stereo_video import StereoVideo
+
+    fps, n, w, h = 30, 24, 192, 128
+    lens = Lens(150, 150, 96, 64)
+    rig = StereoRig(w, h, lens, lens, np.eye(3), (-0.06, 0, 0))
+    with av.open(str(tmp_path / "pair.mp4"), "w") as out:  # one side-by-side file: left camera in the left half
+        stream = out.add_stream("h264", rate=fps)
+        stream.width, stream.height, stream.pix_fmt = 2 * w, h, "yuv420p"
+        for i in range(n):
+            image = np.full((h, 2 * w, 3), 40 + 4 * i, np.uint8)
+            for packet in stream.encode(av.VideoFrame.from_ndarray(image, format="rgb24")):
+                out.mux(packet)
+        for packet in stream.encode():
+            out.mux(packet)
+    truth = np.stack([hand_at([0.02 * np.sin(i / 5), 0.1, 0.45]) for i in range(n)])
+    frames = [views(truth[i], None, rig=rig) for i in range(n)]
+    lab = label_stereo(rig, [tuple(np.stack([f[v][k] for f in frames]) for k in range(3)) for v in (0, 1)], fps)
+    t = np.arange(0, 1, 0.01)
+    np.savetxt(tmp_path / "imu.csv", np.column_stack([t, np.ones_like(t)]), delimiter=",", header="t,gz", comments="")
+    episode = StereoEpisode(StereoVideo(tmp_path / "pair.mp4"), rig, lab, Segment(0, n, 1.0, 0.0), "test", Imu(tmp_path / "imu.csv"))
+
+    summary = write_stereo_dataset([episode], tmp_path / "ds", "local/test", width=96, step=2, preview_dir=tmp_path / "prev")
+    assert summary["frames"] == n // 2 and summary["valid_triangulation_rate"] == 1.0
+    meta = tmp_path / "ds" / "meta"
+    stats = json.loads((meta / "triangulation_stats.json").read_text())
+    assert stats["summary"]["hand_frames_triangulated"] == n // 2 and len(stats["episodes"][0]["per_frame"]["frame"]) == n // 2
+    calib = json.loads((meta / "calibration.json").read_text())
+    assert calib["stored"]["left"]["fx"] == 75 and np.isclose(calib["stored"]["baseline_m"], 0.06)
+    info = json.loads((meta / "info.json").read_text())["features"]
+    assert {"observation.images.left", "observation.images.right", "observation.extrinsics", "observation.imu"} <= set(info)
+    assert (meta / "imu" / "episode_000000.csv").exists() and (tmp_path / "prev" / "episode_000000.mp4").exists()
+
+
 def test_imu_means_per_frame(tmp_path):
     from ego2lerobot.stereo_export import Imu
     t = np.arange(0, 1, 0.005)

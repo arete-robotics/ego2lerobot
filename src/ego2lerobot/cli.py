@@ -2,7 +2,6 @@
 
   ego2lerobot run VIDEO [VIDEO ...] --out DATASET [--intrinsics cam.json | --hfov 100] [--caption]
   ego2lerobot detect VIDEO HANDS.npz
-  ego2lerobot stereo LEFT RIGHT --calib stereo.json --out DATASET   (see ego2lerobot stereo -h)
 """
 from __future__ import annotations
 
