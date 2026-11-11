@@ -39,7 +39,9 @@ def prepare(src: str | Path, out: str | Path, width: int = 1920, fps: float = 30
     for frame in container.decode(stream):
         if decoded % every == 0:
             small = frame.reformat(width=ow, height=oh, format="yuv420p")
-            small.pts = None
+            # PyAV rebases pts from the frame's own time base, which is still the source's (e.g. 1/600 s);
+            # stamp both, or kept frames collapse onto the same timestamp and muxing fails.
+            small.pts, small.time_base = kept, 1 / out_rate
             for packet in enc.encode(small):
                 writer.mux(packet)
             kept += 1
