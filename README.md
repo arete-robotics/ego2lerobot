@@ -11,6 +11,8 @@
 pip install git+https://github.com/ChizkiyahuOhayon/ego2lerobot
 # instructions from a vision-language model (Apple silicon):
 pip install "ego2lerobot[caption] @ git+https://github.com/ChizkiyahuOhayon/ego2lerobot"
+# ... or on Linux with an NVIDIA GPU (see docs/linux_gpu.md):
+pip install "ego2lerobot[caption-cuda] @ git+https://github.com/ChizkiyahuOhayon/ego2lerobot"
 ```
 
 ## Use
@@ -46,7 +48,7 @@ ds = LeRobotDataset("local/ego2lerobot", root="my_dataset")
 2. **3D**: MediaPipe's metric hand shape is placed in the camera frame. A least-squares fit finds the translation that projects it onto the detected keypoints, after removing lens distortion (pinhole or OpenCV fisheye).
 3. **Actions**: a palm frame from the wrist and the index and little-finger knuckles, plus the thumb–index distance as grip. Each frame's action is the next frame's wrist pose and grip.
 4. **Episodes**: stretches where hands are in view, 3–15 s long. Gaps under 1 s are bridged.
-5. **Language** (optional): [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) sees 4 frames per episode and writes an instruction, sub-steps and objects. It runs locally through [MLX](https://github.com/Blaizzy/mlx-vlm). Episodes it calls idle are dropped.
+5. **Language** (optional): [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) sees 4 frames per episode and writes an instruction, sub-steps and objects. It runs locally through [MLX](https://github.com/Blaizzy/mlx-vlm) on Apple silicon, through Hugging Face transformers on an NVIDIA GPU (`--caption-backend transformers`), or on any OpenAI-compatible server such as vLLM (`--caption-url http://host:8000/v1`). Same prompt and output for all three; see [docs/linux_gpu.md](docs/linux_gpu.md). Episodes it calls idle are dropped.
 
 Everything runs locally; no video leaves your machine.
 
@@ -54,7 +56,7 @@ Everything runs locally; no video leaves your machine.
 - **Depth comes from the average human hand size, not a depth sensor.** Expect errors of a few centimetres in distance.
 - Fast, blurred or gloved hands are often missed. Left and right are sometimes swapped when only one hand is visible.
 - Captions are machine-written and can be generic or wrong; check them before relying on them.
-- The language step needs Apple silicon today. Detection, 3D and export run anywhere Python runs.
+- The language step needs Apple silicon or a GPU. The GPU path is new and not yet verified on real hardware (checklist in [docs/linux_gpu.md](docs/linux_gpu.md)). Detection, 3D, export and the QC report run anywhere Python runs.
 
 ## Licences
 - **Code:** Apache 2.0.
