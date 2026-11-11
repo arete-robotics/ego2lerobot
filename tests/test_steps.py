@@ -233,3 +233,40 @@ def test_portable_keeps_paths_next_to_the_dataset_and_hides_the_rest(tmp_path):
     assert portable(tmp_path / "source" / "a.mp4", tmp_path / "dataset") == "../source/a.mp4"
     assert portable(tmp_path / "dataset" / "a.mp4", tmp_path / "dataset") == "a.mp4"
     assert portable(Path("/somewhere/else/a.mp4"), tmp_path / "x" / "dataset") == "a.mp4"
+
+
+def test_merge_agreeing_joins_touching_neighbours_up_to_max_length():
+    from ego2lerobot.segments import Segment, merge_agreeing
+    track = step_track(300)
+    steps = [Segment(0, 60, 1, 0), Segment(60, 120, 1, 0), Segment(120, 180, 1, 0), Segment(200, 260, 1, 0)]
+    out, labels, merged = merge_agreeing(steps, ["a", "a", "b", "b"], lambda x, y: x == y, track, max_seconds=15)
+    assert [(s.start, s.end) for s in out] == [(0, 120), (120, 180), (200, 260)]  # 180 → 200 do not touch
+    assert labels == ["a", "b", "b"] and merged == [True, False, False] and out[0].cuts["merged_at"] == [60]
+    out, _, merged = merge_agreeing(steps, ["a"] * 4, lambda x, y: x == y, track, max_seconds=4.5)
+    assert [(s.start, s.end) for s in out] == [(0, 120), (120, 180), (200, 260)]  # 0–180 would be 6 s > 4.5 s
+    assert merged == [True, False, False]
+
+
+def test_captions_agree():
+    from ego2lerobot.caption import captions_agree
+    a = {"task": "insert the cable into the slot", "object": "cable"}
+    assert captions_agree(a, {"task": "place the cable connector in the loop", "object": "cable connector"})
+    assert not captions_agree(a, {"task": "open the bag", "object": "plastic bag"})
+    assert not captions_agree(a, {"task": "idle", "object": ""})
+
+
+def test_run_with_captions_stores_verification_and_reports_it(tmp_path, clip, monkeypatch):
+    pytest.importorskip("lerobot")
+    from ego2lerobot import caption
+    from ego2lerobot.cli import main
+    monkeypatch.setattr(caption, "make_backend", lambda *a, **k: ScriptedBackend(*[FOLD, FOLD2] * 10))
+    video, cache = clip
+    out = tmp_path / "work" / "ds"
+    main(["run", str(video), "--out", str(out), "--cache", str(cache), "--hfov", "90", "--width", "64", "--caption"])
+    info = json.loads((out / "meta" / "episodes_info.json").read_text())
+    assert [e["task"] for e in info] == ["fold the towel"] and info[0]["verified"] is True
+    assert info[0]["check"]["second_instruction"] == "crease the towel in half" and info[0]["state"]["end"] == "folded"
+    tasks = __import__("pyarrow.parquet", fromlist=["x"]).read_table(out / "meta" / "tasks.parquet").to_pandas()
+    assert "fold the towel" in set(tasks.index) | set(tasks.get("task", []))
+    report = json.loads((out / "qc_report.json").read_text())
+    assert report["overall"]["captions"]["verification"]["rate"] == 1.0

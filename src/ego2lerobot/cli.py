@@ -19,7 +19,7 @@ import av
 from .camera import Camera
 from .export import Episode, write_dataset
 from .hands import HandTrack, detect
-from .segments import find_segments, find_steps, spread
+from .segments import find_segments, find_steps, merge_agreeing, spread
 from .signals import grasp_events
 from . import stereo_cli
 
@@ -69,6 +69,34 @@ def events_between(events: dict, start: int, end: int, fps: float) -> list[dict]
                    for side, evs in events.items() for e in evs if start <= e["frame"] < end), key=lambda e: e["t"])
 
 
+def action_steps(video: Path, track: HandTrack, events: dict, captioner, args, min_seconds: float, entry: dict):
+    """--segment action: steps that follow the work, each with its first caption (None without --caption).
+
+    Cuts come from find_steps (checked by the captioner). Steps with too little hand in view are dropped; touching
+    neighbours whose first captions agree (same kind of action on the same object) are merged and captioned again.
+    Adds the candidate cuts ("boundaries") and every step found ("steps") to `entry` for meta/run.json."""
+    judge = None
+    if captioner:
+        def judge(frame, lo, hi):
+            return captioner.boundary(video, track, frame, lo, hi)
+    steps, entry["boundaries"] = find_steps(track, judge, min_seconds, args.max_seconds, events=events)
+    confirmed = sum(bool(d.get("new_step")) for d in entry["boundaries"])
+    print(f"{video.name}: {len(entry['boundaries'])} candidate cuts checked, {confirmed} confirmed, {len(steps)} steps",
+          flush=True)
+    low = [s for s in steps if s.hand_coverage < args.min_coverage]
+    steps = [s for s in steps if s.hand_coverage >= args.min_coverage]
+    firsts = [None] * len(steps)
+    if captioner:
+        from .caption import captions_agree
+        firsts = [captioner.caption(video, track, s.start, s.end) for s in steps]
+        steps, firsts, merged = merge_agreeing(steps, firsts, captions_agree, track, args.max_seconds)
+        firsts = [captioner.caption(video, track, s.start, s.end) if m else f for s, f, m in zip(steps, firsts, merged)]
+        print(f"{video.name}: {sum(merged)} steps merged from neighbours with agreeing captions", flush=True)
+    entry["steps"] = [{"start": s.start, "end": s.end, "hand_coverage": s.hand_coverage, "cuts": s.cuts}
+                      for s in sorted(low + steps, key=lambda s: s.start)]
+    return list(zip(steps, firsts))
+
+
 def run(args) -> None:
     cache = args.cache or args.out.with_name(args.out.name + "_cache")
     cache.mkdir(parents=True, exist_ok=True)
@@ -96,28 +124,24 @@ def run(args) -> None:
             src = json.loads(side.read_text())
             entry["original"] = {k: src[k] for k in ("source", "width", "height", "fps", "seconds", "codec") if k in src}
         if action:
-            judge = None
-            if captioner:
-                def judge(frame, lo, hi, video=video, track=track):
-                    return captioner.boundary(video, track, frame, lo, hi)
-            segments, entry["boundaries"] = find_steps(track, judge, min_seconds, args.max_seconds, events=events)
-            entry["steps"] = [{"start": s.start, "end": s.end, "hand_coverage": s.hand_coverage, "cuts": s.cuts}
-                              for s in segments]
-            print(f"{video.name}: {len(entry['boundaries'])} candidate cuts checked, "
-                  f"{sum(bool(d.get('new_step')) for d in entry['boundaries'])} confirmed, {len(segments)} steps", flush=True)
-            segments = [s for s in segments if s.hand_coverage >= args.min_coverage]
+            items = action_steps(video, track, events, captioner, args, min_seconds, entry)
         else:
-            segments = find_segments(track, min_seconds, args.max_seconds, min_coverage=args.min_coverage)
+            items = [(seg, None) for seg in find_segments(track, min_seconds, args.max_seconds, min_coverage=args.min_coverage)]
         videos.append(entry)
         if args.per_video:
-            segments = spread(segments, args.per_video)
-        for seg in segments:
+            items = spread(items, args.per_video)
+        for seg, first in items:
             info = {"seconds": round(seg.seconds(track.fps), 2), "hand_coverage": seg.hand_coverage}
             if action:
                 info["cuts"] = seg.cuts
             task = args.default_task
             if captioner:
-                caption = captioner(video, track, seg.start, seg.end) if action else captioner(video, seg.start, seg.end, track.fps)
+                if not action:
+                    caption = captioner(video, seg.start, seg.end, track.fps)
+                elif first["task"] == "idle":
+                    caption = first
+                else:
+                    caption = captioner.verify(video, track, seg.start, seg.end, first)
                 reason = None
                 if caption.get("task", "").strip().lower() == "idle":
                     reason = "caption said idle"
@@ -128,11 +152,11 @@ def run(args) -> None:
                                     "task": caption.get("task")})
                     continue
                 task = caption.get("task") or task
-                info.update({k: caption[k] for k in ("steps", "object", "objects", "verified", "confidence", "check",
-                                                      "caption_problems") if k in caption})
+                info.update({k: caption[k] for k in ("steps", "object", "objects", "state", "verified", "confidence",
+                                                      "check", "caption_problems") if k in caption})
             info["grasp_events"] = events_between(events, seg.start, seg.end, track.fps)
             episodes.append(Episode(video, camera, track, seg, task.strip(), info))
-        print(f"{video.name}: {len(segments)} {'steps' if action else 'episodes'}", flush=True)
+        print(f"{video.name}: {len(items)} {'steps' if action else 'episodes'}", flush=True)
     write_dataset(episodes, args.out, args.repo_id, args.width, args.step, args.preview)
     write_grasp_events(args.out, grasp)
     from .qc import write_report, write_run_log

@@ -422,12 +422,10 @@ class StepCaptioner:
         return self.ask([got[i] for i in at] + [self.closeup(got[i], track, i) for i in at],
                         STEP_PROMPT.format(n=len(at), n1=len(at) + 1, m=2 * len(at)))
 
-    def __call__(self, video, track, start: int, end: int) -> dict:
-        span = end - start
-        at = [start + int(span * f) for f in CAPTION_AT]
-        again = [start + int(span * f) for f in VERIFY_AT]
-        got = self.frames(video, track, at + again)
-        reply = self.describe(got, track, at)
+    def caption(self, video, track, start: int, end: int) -> dict:
+        """The first answer for frames [start, end): {"task", "object", "objects", "state", "caption_problems"}."""
+        at = [start + int((end - start) * f) for f in CAPTION_AT]
+        reply = self.describe(self.frames(video, track, at), track, at)
         obj = str(reply.get("object") or "").strip()
         objects = normalize({"objects": reply.get("objects")})["objects"]
         raw = str(reply.get("instruction") or reply.get("task") or "").strip()
@@ -436,15 +434,31 @@ class StepCaptioner:
         task, problems = imperative(raw)
         if not names_object(task, obj):
             problems.append("the instruction does not name the object" if obj else "no object given")
-        second = self.describe(got, track, again)
-        second_task = imperative(str(second.get("instruction") or "").strip())[0]
-        second_obj = str(second.get("object") or "").strip()
-        action_ok = same_action(task, second_task)
-        object_ok = same_object(obj, task, second_obj, second_task)
         return {"task": task, "object": obj, "objects": objects,
                 "state": {"start": str(reply.get("at_start", "")), "end": str(reply.get("at_end", ""))},
-                "verified": action_ok and object_ok and not problems,
-                "confidence": round((action_ok + object_ok + (not problems)) / 3, 2),
-                "check": {"second_instruction": second_task, "second_object": second_obj, "same_action": action_ok,
-                          "same_object": object_ok},
                 "caption_problems": problems}
+
+    def verify(self, video, track, start: int, end: int, first: dict) -> dict:
+        """`first` plus verified, confidence and check, from a second caption at other moments of the step."""
+        again = [start + int((end - start) * f) for f in VERIFY_AT]
+        second = self.describe(self.frames(video, track, again), track, again)
+        second_task = imperative(str(second.get("instruction") or "").strip())[0]
+        second_obj = str(second.get("object") or "").strip()
+        action_ok = same_action(first["task"], second_task)
+        object_ok = same_object(first["object"], first["task"], second_obj, second_task)
+        format_ok = not first["caption_problems"]
+        return {**first, "verified": action_ok and object_ok and format_ok,
+                "confidence": round((action_ok + object_ok + format_ok) / 3, 2),
+                "check": {"second_instruction": second_task, "second_object": second_obj, "same_action": action_ok,
+                          "same_object": object_ok}}
+
+    def __call__(self, video, track, start: int, end: int) -> dict:
+        first = self.caption(video, track, start, end)
+        return first if first["task"] == "idle" else self.verify(video, track, start, end, first)
+
+
+def captions_agree(a: dict, b: dict) -> bool:
+    """Two first answers describe the same step: same kind of action on the same object (and neither is idle)."""
+    if "idle" in (a.get("task"), b.get("task")):
+        return False
+    return same_action(a["task"], b["task"]) and same_object(a["object"], a["task"], b["object"], b["task"])

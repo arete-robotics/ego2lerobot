@@ -148,3 +148,25 @@ def _fill(inner: list[Candidate], a: int, b: int, speed: np.ndarray, gap: float,
                 break
         else:
             return out
+
+
+def merge_agreeing(steps: list[Segment], labels: list, agree: Callable, track: HandTrack, max_seconds: float = 15.0,
+                   ) -> tuple[list[Segment], list, list[bool]]:
+    """Merge touching neighbours whose labels agree (shortest merged pair first) while the result is at most
+    `max_seconds`. Returns the steps, a label for each (the longer part's), and whether each was merged."""
+    steps, labels, merged = list(steps), list(labels), [False] * len(steps)
+    present, both = track.score.max(1) > 0, track.score.min(1) > 0
+    while True:
+        pairs = [(steps[k + 1].end - steps[k].start, k) for k in range(len(steps) - 1)
+                 if steps[k].end == steps[k + 1].start and steps[k + 1].end - steps[k].start <= max_seconds * track.fps
+                 and agree(labels[k], labels[k + 1])]
+        if not pairs:
+            return steps, labels, merged
+        _, k = min(pairs)
+        a, b = steps[k], steps[k + 1]
+        steps[k:k + 2] = [Segment(a.start, b.end, round(float(present[a.start:b.end].mean()), 3),
+                                  round(float(both[a.start:b.end].mean()), 3), {"start": a.cuts.get("start", ""),
+                                  "end": b.cuts.get("end", ""), "merged_at": a.cuts.get("merged_at", []) + [a.end]
+                                  + b.cuts.get("merged_at", [])})]
+        labels[k:k + 2] = [labels[k] if a.end - a.start >= b.end - b.start else labels[k + 1]]
+        merged[k:k + 2] = [True]
