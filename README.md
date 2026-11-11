@@ -8,11 +8,11 @@
 
 ## Install
 ```bash
-pip install git+https://github.com/ChizkiyahuOhayon/ego2lerobot
+pip install git+https://github.com/arete-robotics/ego2lerobot
 # instructions from a vision-language model (Apple silicon):
-pip install "ego2lerobot[caption] @ git+https://github.com/ChizkiyahuOhayon/ego2lerobot"
+pip install "ego2lerobot[caption] @ git+https://github.com/arete-robotics/ego2lerobot"
 # ... or on Linux with an NVIDIA GPU (see docs/linux_gpu.md):
-pip install "ego2lerobot[caption-cuda] @ git+https://github.com/ChizkiyahuOhayon/ego2lerobot"
+pip install "ego2lerobot[caption-cuda] @ git+https://github.com/arete-robotics/ego2lerobot"
 ```
 
 ## Use
@@ -110,7 +110,7 @@ If you would rather not run this yourself, or you need larger volumes, measured 
   author = {Liu, Zhao},
   title = {ego2lerobot: first-person video to LeRobot datasets},
   year = {2026},
-  url = {https://github.com/ChizkiyahuOhayon/ego2lerobot}
+  url = {https://github.com/arete-robotics/ego2lerobot}
 }
 ```
 

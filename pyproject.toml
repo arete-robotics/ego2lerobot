@@ -23,5 +23,5 @@ rtmpose = ["rtmlib>=0.0.13", "onnxruntime>=1.16"]  # optional second hand model 
 ego2lerobot = "ego2lerobot.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ChizkiyahuOhayon/ego2lerobot"
+Homepage = "https://github.com/arete-robotics/ego2lerobot"
 Sample = "https://huggingface.co/datasets/arete-robotics/egocentric-10k-actions-sample"
