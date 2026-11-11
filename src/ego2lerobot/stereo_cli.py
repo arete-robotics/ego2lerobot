@@ -28,6 +28,11 @@ def add_parser(sub) -> None:
                    help="add RTMPose-m hand keypoints as a second model (needs ego2lerobot[rtmpose]); off by default "
                         "because its weights were trained on research-only datasets")
     s.add_argument("--max-depth", type=float, default=1.5, help="farthest plausible hand, metres (default 1.5)")
+    s.add_argument("--max-epipolar", type=float, default=0.01,
+                   help="largest median row disagreement of a matched hand after rectification, as a share of the image "
+                        "height (default 0.01: 10.8 px at 1080 rows)")
+    s.add_argument("--max-reprojection", type=float, default=0.006,
+                   help="largest reprojection error of one joint, as a share of the image height (default 0.006)")
     s.add_argument("--caption", action="store_true", help="instructions from Qwen3-VL on the left view (ego2lerobot[caption])")
     s.add_argument("--caption-model", default="mlx-community/Qwen3-VL-8B-Instruct-4bit")
     s.add_argument("--default-task", default="manipulate objects with the hands")
@@ -87,7 +92,7 @@ def run(args) -> None:
     if args.caption:
         from .caption import Captioner
         captioner = Captioner(args.caption_model)
-    checks = Checks(max_depth=args.max_depth)
+    checks = Checks(max_epipolar=args.max_epipolar, max_reprojection=args.max_reprojection, max_depth=args.max_depth)
     episodes = []
     for k, (left, right) in enumerate(clips):
         video = StereoVideo(left, right)
@@ -110,4 +115,7 @@ def run(args) -> None:
                 info.update({k_: caption[k_] for k_ in ("steps", "objects") if k_ in caption})
             episodes.append(StereoEpisode(video, rig, labels, seg, task.strip(), imu, info))
         print(f"{video.name}: {len(segments)} episodes", flush=True)
+    if not episodes:
+        raise SystemExit("no episode has enough frames with triangulated hands; see the statistics above "
+                         "(check the calibration, or lower --min-coverage / --min-seconds)")
     write_stereo_dataset(episodes, args.out, args.repo_id, args.width, args.step, args.preview)
