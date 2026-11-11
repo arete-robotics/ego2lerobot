@@ -11,7 +11,7 @@ StepCaptioner (default) labels sub-steps with two prompts:
   boundary   frames just before and just after a candidate cut: does a new step start here?   (used by find_steps)
   caption    three full frames and three close-ups around the hands: an imperative instruction naming the object,
              asked twice for every step, from two different sets of moments in the step
-and returns {"task", "object", "objects", "state", "verified", "confidence", "check", "caption_problems"}. The step is
+and returns {"task", "object", "objects", "verified", "confidence", "check", "caption_problems"}. The step is
 verified when the second, independent answer agrees with the first on the action (same verb or a verb of the same
 kind, see VERB_GROUPS) and on the object, and the first is an imperative naming its object. A caption that fails is
 kept but marked verified: false.
@@ -200,12 +200,10 @@ Reply with JSON only:
 {{"before": "<what the hands do before T: verb and object>", "after": "<what the hands do after T: verb and object>", "new_step": true or false}}"""
 
 STEP_PROMPT = """Images 1 to {n} are full views from a camera on a worker's head during one short step of hand work, in time order. Images {n1} to {m} are close-ups around the hands at the same moments.
-Say what the hands do in this step. Only objects the hands hold or touch count: finished products, machines and stacks in the background are not part of the step unless the hands touch them. Name the object by what it is in these images (for example a flat sheet, a bag, a cable), not by what it may become. If several things happen, describe the main one.
+Say what the hands do in this step. Only objects the hands hold or touch count: finished products, machines and stacks in the background are not part of the step unless the hands touch them. If several things happen, describe the main one.
 Reply with JSON only, in English:
 {{"object": "<the object the hands manipulate, 1 to 4 words>",
- "at_start": "<where the object is and what it looks like in the first images>",
- "at_end": "<where the object is and what it looks like in the last images>",
- "instruction": "<one imperative instruction for a robot, at most 12 words, starting with a verb (pick up, place, fold, insert, press, open, turn ...), that takes the object from its start to its end state and names it>",
+ "instruction": "<one imperative instruction for a robot, at most 12 words, starting with a verb (pick up, place, fold, insert, press, open, turn ...) and naming the object>",
  "objects": ["<everything the hands touch>"]}}
 If the hands are not manipulating anything, use "instruction": "idle"."""
 
@@ -423,7 +421,7 @@ class StepCaptioner:
                         STEP_PROMPT.format(n=len(at), n1=len(at) + 1, m=2 * len(at)))
 
     def caption(self, video, track, start: int, end: int) -> dict:
-        """The first answer for frames [start, end): {"task", "object", "objects", "state", "caption_problems"}."""
+        """The first answer for frames [start, end): {"task", "object", "objects", "caption_problems"}."""
         at = [start + int((end - start) * f) for f in CAPTION_AT]
         reply = self.describe(self.frames(video, track, at), track, at)
         obj = str(reply.get("object") or "").strip()
@@ -434,9 +432,7 @@ class StepCaptioner:
         task, problems = imperative(raw)
         if not names_object(task, obj):
             problems.append("the instruction does not name the object" if obj else "no object given")
-        return {"task": task, "object": obj, "objects": objects,
-                "state": {"start": str(reply.get("at_start", "")), "end": str(reply.get("at_end", ""))},
-                "caption_problems": problems}
+        return {"task": task, "object": obj, "objects": objects, "caption_problems": problems}
 
     def verify(self, video, track, start: int, end: int, first: dict) -> dict:
         """`first` plus verified, confidence and check, from a second caption at other moments of the step."""

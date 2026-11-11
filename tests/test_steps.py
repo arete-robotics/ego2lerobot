@@ -114,7 +114,7 @@ def wide_video(tmp_path_factory) -> Path:
     return path
 
 
-FOLD = '{"object": "towel", "at_start": "flat", "at_end": "folded", "instruction": "Folding the towel", "objects": ["towel"]}'
+FOLD = '{"object": "towel", "instruction": "Folding the towel", "objects": ["towel"]}'
 FOLD2 = '{"object": "blue towel", "instruction": "crease the towel in half"}'
 
 
@@ -137,8 +137,7 @@ def step_track(n=60):
 def test_step_captioner_asks_twice_with_close_ups_and_checks_agreement(wide_video):
     backend = ScriptedBackend()
     out = StepCaptioner(backend=backend)(wide_video, step_track(), 0, 60)
-    assert out == {"task": "fold the towel", "object": "towel", "objects": ["towel"],
-                   "state": {"start": "flat", "end": "folded"}, "verified": True, "confidence": 1.0,
+    assert out == {"task": "fold the towel", "object": "towel", "objects": ["towel"], "verified": True, "confidence": 1.0,
                    "check": {"second_instruction": "crease the towel in half", "second_object": "blue towel",
                              "same_action": True, "same_object": True},
                    "caption_problems": []}
@@ -265,7 +264,7 @@ def test_run_with_captions_stores_verification_and_reports_it(tmp_path, clip, mo
     main(["run", str(video), "--out", str(out), "--cache", str(cache), "--hfov", "90", "--width", "64", "--caption"])
     info = json.loads((out / "meta" / "episodes_info.json").read_text())
     assert [e["task"] for e in info] == ["fold the towel"] and info[0]["verified"] is True
-    assert info[0]["check"]["second_instruction"] == "crease the towel in half" and info[0]["state"]["end"] == "folded"
+    assert info[0]["check"]["second_instruction"] == "crease the towel in half"
     tasks = __import__("pyarrow.parquet", fromlist=["x"]).read_table(out / "meta" / "tasks.parquet").to_pandas()
     assert "fold the towel" in set(tasks.index) | set(tasks.get("task", []))
     report = json.loads((out / "qc_report.json").read_text())

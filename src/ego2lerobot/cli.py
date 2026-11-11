@@ -152,7 +152,7 @@ def run(args) -> None:
                                     "task": caption.get("task")})
                     continue
                 task = caption.get("task") or task
-                info.update({k: caption[k] for k in ("steps", "object", "objects", "state", "verified", "confidence",
+                info.update({k: caption[k] for k in ("steps", "object", "objects", "verified", "confidence",
                                                       "check", "caption_problems") if k in caption})
             info["grasp_events"] = events_between(events, seg.start, seg.end, track.fps)
             episodes.append(Episode(video, camera, track, seg, task.strip(), info))
