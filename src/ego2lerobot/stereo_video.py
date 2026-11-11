@@ -14,6 +14,18 @@ RTMPOSE_URL = ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx
                "rtmpose-m_simcc-hand5_pt-aic-coco_210e-256x256-74fb594_20230320.zip")
 
 
+def h264_stream(container, rate, width: int, height: int):
+    """An H.264 output stream. Uses OpenH264 (BSD) when PyAV has it, because PyAV's default H.264 encoder is x264 (GPL)."""
+    try:
+        av.codec.Codec("libopenh264", "w")
+        stream = container.add_stream("libopenh264", rate=rate)
+        stream.bit_rate = 8 * width * height  # about 8 bits per pixel per second: clean previews at 15-30 fps
+    except Exception:
+        stream = container.add_stream("h264", rate=rate)
+    stream.width, stream.height, stream.pix_fmt = width, height, "yuv420p"
+    return stream
+
+
 class StereoVideo:
     """Left and right views. With one file, its left half is the left camera and its right half the right camera.
     Two files must start together at the same frame rate; frames are paired by index."""
@@ -181,8 +193,7 @@ def caption_video(video: StereoVideo, cache: Path, width: int = 640) -> Path:
     if not path.exists():
         w, h = video.size(width)
         with av.open(str(path), "w") as out:
-            stream = out.add_stream("h264", rate=video.rate)
-            stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
+            stream = h264_stream(out, video.rate, w, h)
             for _, left, _ in video.frames(width=w):
                 for packet in stream.encode(av.VideoFrame.from_ndarray(np.ascontiguousarray(left), format="rgb24")):
                     out.mux(packet)

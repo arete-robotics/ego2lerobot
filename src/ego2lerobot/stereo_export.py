@@ -16,7 +16,7 @@ from .export import features as mono_features
 from .hands import BONES, JOINTS, SIDES, end_effector
 from .segments import Segment
 from .stereo import REASONS, StereoLabels, StereoRig, per_frame, summarize
-from .stereo_video import StereoVideo
+from .stereo_video import StereoVideo, h264_stream
 
 
 class Imu:
@@ -96,8 +96,7 @@ class Preview:
     def __init__(self, path: Path, width: int, height: int, fps: int):
         self.width, self.height = width, height
         self.container = av.open(str(path), "w")
-        self.stream = self.container.add_stream("h264", rate=fps)
-        self.stream.width, self.stream.height, self.stream.pix_fmt = 2 * width, height + self.PANEL, "yuv420p"
+        self.stream = h264_stream(self.container, fps, 2 * width, height + self.PANEL)
         self.font = ImageFont.load_default(size=max(12, height // 28))
 
     def add(self, left: np.ndarray, right: np.ndarray, labels: StereoLabels, i: int, rig: StereoRig, seconds: float):
