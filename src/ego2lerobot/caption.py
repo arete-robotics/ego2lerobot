@@ -7,12 +7,14 @@
 Every backend gets the same images (JPEG, 448 px wide), the same prompts, greedy decoding and at most MAX_TOKENS new
 tokens, and every reply goes through the same parser, so the output schema does not depend on the backend.
 
-StepCaptioner (default) labels sub-steps. It answers three questions, each with its own prompt:
+StepCaptioner (default) labels sub-steps with two prompts:
   boundary   frames just before and just after a candidate cut: does a new step start here?   (used by find_steps)
-  caption    three full frames and three close-ups around the hands: an imperative instruction naming the object
-  verify     four other close-ups and the proposed instruction: is that the object in the hands, and the action?
-and returns {"task", "object", "objects", "verified", "confidence", "check", "caption_problems"}. A caption that fails
-the check or the format rules is kept but marked verified: false.
+  caption    three full frames and three close-ups around the hands: an imperative instruction naming the object,
+             asked twice for every step, from two different sets of moments in the step
+and returns {"task", "object", "objects", "state", "verified", "confidence", "check", "caption_problems"}. The step is
+verified when the second, independent answer agrees with the first on the action (same verb or a verb of the same
+kind, see VERB_GROUPS) and on the object, and the first is an imperative naming its object. A caption that fails is
+kept but marked verified: false.
 
 Captioner is the earlier one-question labeller ({"task", "steps", "objects"} from four frames), kept so that datasets
 made with `--segment fixed` can be reproduced. Without --caption, episodes get the `--default-task` text.
@@ -198,23 +200,17 @@ Reply with JSON only:
 {{"before": "<what the hands do before T: verb and object>", "after": "<what the hands do after T: verb and object>", "new_step": true or false}}"""
 
 STEP_PROMPT = """Images 1 to {n} are full views from a camera on a worker's head during one short step of hand work, in time order. Images {n1} to {m} are close-ups around the hands at the same moments.
-Say what the hands do in this step. Only objects the hands hold or touch count: finished products, machines and stacks in the background are not part of the step unless the hands touch them. If several things happen, describe the main one.
+Say what the hands do in this step. Only objects the hands hold or touch count: finished products, machines and stacks in the background are not part of the step unless the hands touch them. Name the object by what it is in these images (for example a flat sheet, a bag, a cable), not by what it may become. If several things happen, describe the main one.
 Reply with JSON only, in English:
 {{"object": "<the object the hands manipulate, 1 to 4 words>",
- "instruction": "<one imperative instruction for a robot, at most 12 words, starting with a verb (pick up, place, fold, insert, press, open, turn ...) and naming the object>",
+ "at_start": "<where the object is and what it looks like in the first images>",
+ "at_end": "<where the object is and what it looks like in the last images>",
+ "instruction": "<one imperative instruction for a robot, at most 12 words, starting with a verb (pick up, place, fold, insert, press, open, turn ...), that takes the object from its start to its end state and names it>",
  "objects": ["<everything the hands touch>"]}}
 If the hands are not manipulating anything, use "instruction": "idle"."""
 
-VERIFY_PROMPT = """These {n} images are close-ups around a worker's hands, in time order, from a camera on the worker's head.
-Proposed instruction for what the hands do: "{instruction}"
-First look at what the hands hold and how they move, then check the instruction against it.
-Reply with JSON only:
-{{"in_hands": "<the object the hands hold or touch>", "motion": "<what the hands do, 2 to 6 words>",
- "object_matches": "yes" or "no", "action_matches": "yes" or "no"}}
-Answer "no" for object_matches if the instruction names an object the hands do not hold or touch, and "no" for action_matches if the hands do not do that action (for example the instruction says place or close but the hands fold, or the reverse). Things only in the background do not count."""
-
 CAPTION_AT = (0.2, 0.5, 0.8)  # where in the step the caption frames are taken (share of its length)
-VERIFY_AT = (0.1, 0.37, 0.63, 0.9)  # the verification close-ups: other moments, so the two passes do not share images
+VERIFY_AT = (0.08, 0.35, 0.92)  # the second, independent caption: other moments, so the two do not share images
 BOUNDARY_AT = (-1.2, -0.4, 0.4, 1.2)  # seconds around a candidate cut
 
 VERBS = frozenset("""
@@ -231,6 +227,23 @@ unwind unwrap unzip use weigh wind wipe wrap zip
 """.split())
 NOT_IMPERATIVE = frozenset("a an the this that it its he she they we i you someone person worker workers hand hands "
                            "both left right".split())
+VERB_GROUPS = tuple(frozenset(g.split()) for g in (  # verbs that describe the same kind of action
+    "place put set lay insert drop load position stack store pack fit move transfer carry bring",
+    "pick take grab grasp lift remove fetch collect pull unload unpack raise",
+    "open unfold unwrap unroll spread tear peel unzip untie unpack",
+    "close seal tape cover",
+    "fold crease bend tuck press flatten smooth form shape",
+    "attach connect plug mount install assemble join screw clip fasten thread insert fit tie wrap",
+    "turn rotate flip twist",
+    "inspect check examine scan count measure",
+    "wipe clean rub polish brush sweep",
+    "cut trim strip",
+    "sort arrange organise organize align adjust straighten position stack",
+    "apply glue stick spray solder tape",
+    "push slide press",
+))
+GENERIC = frozenset("object item thing part piece component small large big long short black white blue green red brown "
+                    "grey gray yellow orange pink clear plastic metal the and with into onto from top bottom side".split())
 
 
 def base_verb(word: str) -> str | None:
@@ -272,6 +285,23 @@ def names_object(instruction: str, obj: str) -> bool:
         if any(w.startswith(stem) for w in said):
             return True
     return False
+
+
+def same_action(a: str, b: str) -> bool:
+    """True if two instructions start with the same verb, or verbs of the same kind (VERB_GROUPS)."""
+    va, vb = (base_verb(t.split(" ", 1)[0]) if t else None for t in (a, b))
+    return bool(va and vb) and (va == vb or any(va in g and vb in g for g in VERB_GROUPS))
+
+
+def content_words(text: str) -> set[str]:
+    words = (w[:-1] if w.endswith("s") and len(w) > 3 else w for w in re.findall(r"[a-z]+", text.lower()))
+    return {w for w in words if len(w) >= 3 and w not in GENERIC and w not in NOT_IMPERATIVE}
+
+
+def same_object(a_object: str, a_text: str, b_object: str, b_text: str) -> bool:
+    """True if either answer's object shares a content word with the other answer's object or instruction."""
+    return bool(content_words(a_object) & content_words(b_object + " " + b_text)
+                or content_words(b_object) & content_words(a_object + " " + a_text))
 
 
 def yes(value) -> bool:
@@ -386,15 +416,18 @@ class StepCaptioner:
         return {"new_step": yes(reply.get("new_step")), "before": str(reply.get("before", "")),
                 "after": str(reply.get("after", ""))}
 
+    def describe(self, got: dict, track, at: list[int]) -> dict:
+        """One caption from full frames and hand close-ups at the frames `at`: {"instruction", "object", ...}."""
+        at = [i for i in at if i in got]
+        return self.ask([got[i] for i in at] + [self.closeup(got[i], track, i) for i in at],
+                        STEP_PROMPT.format(n=len(at), n1=len(at) + 1, m=2 * len(at)))
+
     def __call__(self, video, track, start: int, end: int) -> dict:
         span = end - start
         at = [start + int(span * f) for f in CAPTION_AT]
-        check_at = [start + int(span * f) for f in VERIFY_AT]
-        got = self.frames(video, track, at + check_at)
-        at, check_at = [i for i in at if i in got], [i for i in check_at if i in got]
-        n = len(at)
-        reply = self.ask([got[i] for i in at] + [self.closeup(got[i], track, i) for i in at],
-                         STEP_PROMPT.format(n=n, n1=n + 1, m=2 * n))
+        again = [start + int(span * f) for f in VERIFY_AT]
+        got = self.frames(video, track, at + again)
+        reply = self.describe(got, track, at)
         obj = str(reply.get("object") or "").strip()
         objects = normalize({"objects": reply.get("objects")})["objects"]
         raw = str(reply.get("instruction") or reply.get("task") or "").strip()
@@ -403,12 +436,15 @@ class StepCaptioner:
         task, problems = imperative(raw)
         if not names_object(task, obj):
             problems.append("the instruction does not name the object" if obj else "no object given")
-        check = self.ask([self.closeup(got[i], track, i) for i in check_at],
-                         VERIFY_PROMPT.format(n=len(check_at), instruction=task))
-        object_ok, action_ok = yes(check.get("object_matches")), yes(check.get("action_matches"))
+        second = self.describe(got, track, again)
+        second_task = imperative(str(second.get("instruction") or "").strip())[0]
+        second_obj = str(second.get("object") or "").strip()
+        action_ok = same_action(task, second_task)
+        object_ok = same_object(obj, task, second_obj, second_task)
         return {"task": task, "object": obj, "objects": objects,
-                "verified": object_ok and action_ok and not problems,
-                "confidence": round((object_ok + action_ok + (not problems)) / 3, 2),
-                "check": {"in_hands": str(check.get("in_hands", "")), "motion": str(check.get("motion", "")),
-                          "object_matches": object_ok, "action_matches": action_ok},
+                "state": {"start": str(reply.get("at_start", "")), "end": str(reply.get("at_end", ""))},
+                "verified": action_ok and object_ok and not problems,
+                "confidence": round((action_ok + object_ok + (not problems)) / 3, 2),
+                "check": {"second_instruction": second_task, "second_object": second_obj, "same_action": action_ok,
+                          "same_object": object_ok},
                 "caption_problems": problems}

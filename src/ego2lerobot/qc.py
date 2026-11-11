@@ -416,10 +416,10 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
               "the distance estimate rather than in the image. It includes real motion, so compare deliveries "
               "rather than expect zero. "
               f"*Jumps* are frames where this exceeds {JUMP_M * 100:g} cm (often a depth jump or a left/right swap).",
-             "- *Caption check*: a second question to the model with other close-ups of the hands: does the instruction "
-             "name the object in the hands, and the action they do? Steps that fail, or whose instruction is not an "
-             "imperative naming the object, are marked NOT VERIFIED. A verified caption can still be wrong; the check "
-             "only catches some errors (the number in brackets is the share of checks passed).",
+             "- *Caption check*: the model captions every step twice, from different moments of the step, without "
+             "seeing its first answer. Steps where the two disagree on the action or the object, or whose instruction "
+             "is not an imperative naming the object, are marked NOT VERIFIED. A verified caption can still be wrong: "
+             "both answers can share the same mistake (the number in brackets is the share of checks passed).",
               "- *Unusable ranges*: time outside kept episodes (with the reason it was not kept), and stretches inside "
               "episodes where no hand is usable.", ""]
     return "\n".join(lines)

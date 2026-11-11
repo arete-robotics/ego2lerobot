@@ -8,8 +8,8 @@ import pytest
 from PIL import Image
 
 from ego2lerobot import HandTrack
-from ego2lerobot.caption import (BOUNDARY_PROMPT, STEP_PROMPT, VERIFY_PROMPT, StepCaptioner, hand_box, imperative,
-                                 names_object)
+from ego2lerobot.caption import (BOUNDARY_PROMPT, STEP_PROMPT, StepCaptioner, hand_box, imperative, names_object,
+                                 same_action, same_object)
 from ego2lerobot.segments import find_steps
 from ego2lerobot.signals import candidates, grasp_events
 
@@ -114,53 +114,62 @@ def wide_video(tmp_path_factory) -> Path:
     return path
 
 
-class ScriptedBackend:
-    """Answers each of the three prompts with a fixed reply and records the images it was shown."""
+FOLD = '{"object": "towel", "at_start": "flat", "at_end": "folded", "instruction": "Folding the towel", "objects": ["towel"]}'
+FOLD2 = '{"object": "blue towel", "instruction": "crease the towel in half"}'
 
-    def __init__(self, caption='{"object": "towel", "instruction": "Folding the towel", "objects": ["towel"]}',
-                 verify='{"in_hands": "towel", "motion": "folding", "object_matches": "yes", "action_matches": "yes"}',
-                 boundary='{"before": "fold towel", "after": "place towel", "new_step": true}'):
-        self.replies = {"caption": caption, "verify": verify, "boundary": boundary}
-        self.calls = []
+
+class ScriptedBackend:
+    """Replies to captions in turn from `captions` and to boundary checks with `boundary`; records image sizes."""
+
+    def __init__(self, *captions, boundary='{"before": "fold towel", "after": "place towel", "new_step": true}'):
+        self.captions, self.boundary, self.calls = list(captions or (FOLD, FOLD2)), boundary, []
 
     def generate(self, images, prompt):
-        kind = "boundary" if "moment T" in prompt else "verify" if "Proposed instruction" in prompt else "caption"
+        kind = "boundary" if "moment T" in prompt else "caption"
         self.calls.append((kind, [Image.open(p).size for p in images], prompt))
-        return self.replies[kind]
+        return self.boundary if kind == "boundary" else self.captions.pop(0)
 
 
 def step_track(n=60):
     return track_with([0.5] * n, width=96, height=48, centre=(70.0, 30.0), spread=4.0)
 
 
-def test_step_captioner_prompts_images_and_schema(wide_video):
+def test_step_captioner_asks_twice_with_close_ups_and_checks_agreement(wide_video):
     backend = ScriptedBackend()
     out = StepCaptioner(backend=backend)(wide_video, step_track(), 0, 60)
-    assert out == {"task": "fold the towel", "object": "towel", "objects": ["towel"], "verified": True, "confidence": 1.0,
-                   "check": {"in_hands": "towel", "motion": "folding", "object_matches": True, "action_matches": True},
+    assert out == {"task": "fold the towel", "object": "towel", "objects": ["towel"],
+                   "state": {"start": "flat", "end": "folded"}, "verified": True, "confidence": 1.0,
+                   "check": {"second_instruction": "crease the towel in half", "second_object": "blue towel",
+                             "same_action": True, "same_object": True},
                    "caption_problems": []}
-    (kind, sizes, prompt), (kind2, sizes2, prompt2) = backend.calls
-    assert kind == "caption" and prompt == STEP_PROMPT.format(n=3, n1=4, m=6)
-    assert sizes[:3] == [(448, 224)] * 3  # full views (2:1), then 4:3 close-ups around the hands
-    assert len(sizes) == 6 and all(w == 448 and abs(h - 336) <= 1 for w, h in sizes[3:])
-    assert kind2 == "verify" and prompt2 == VERIFY_PROMPT.format(n=4, instruction="fold the towel") and len(sizes2) == 4
+    assert [c[0] for c in backend.calls] == ["caption", "caption"]
+    for _, sizes, prompt in backend.calls:
+        assert prompt == STEP_PROMPT.format(n=3, n1=4, m=6)
+        assert sizes[:3] == [(448, 224)] * 3  # full views (2:1), then 4:3 close-ups around the hands
+        assert len(sizes) == 6 and all(w == 448 and abs(h - 336) <= 1 for w, h in sizes[3:])
 
 
-@pytest.mark.parametrize("caption, verify, problems", [
-    ('{"object": "towel", "instruction": "fold the towel"}',
-     '{"in_hands": "box", "object_matches": "no", "action_matches": "yes"}', []),
-    ('{"object": "towel", "instruction": "towel folding"}',
-     '{"object_matches": "yes", "action_matches": "yes"}', ["not an imperative: starts with 'towel'"]),
-    ('{"object": "towel", "instruction": "fold it"}',
-     '{"object_matches": "yes", "action_matches": "yes"}', ["the instruction does not name the object"]),
+@pytest.mark.parametrize("first, second, problems", [
+    (FOLD, '{"object": "towel", "instruction": "place the towel on the table"}', []),           # other action
+    (FOLD, '{"object": "cardboard box", "instruction": "fold the cardboard box"}', []),          # other object
+    ('{"object": "towel", "instruction": "towel folding"}', FOLD, ["not an imperative: starts with 'towel'"]),
+    ('{"object": "towel", "instruction": "fold it"}', FOLD, ["the instruction does not name the object"]),
+    (FOLD, '{"object": "", "instruction": "idle"}', []),
 ])
-def test_step_captions_that_fail_the_check_are_marked_not_verified(wide_video, caption, verify, problems):
-    out = StepCaptioner(backend=ScriptedBackend(caption, verify))(wide_video, step_track(), 0, 60)
+def test_step_captions_that_disagree_or_break_the_rules_are_not_verified(wide_video, first, second, problems):
+    out = StepCaptioner(backend=ScriptedBackend(first, second))(wide_video, step_track(), 0, 60)
     assert out["verified"] is False and out["caption_problems"] == problems and out["confidence"] < 1
 
 
-def test_idle_step_skips_verification(wide_video):
-    backend = ScriptedBackend(caption='{"object": "", "instruction": "idle"}')
+def test_same_action_and_same_object():
+    assert same_action("fold the flap", "press down the flap") and same_action("Placing the box", "put the box down")
+    assert not same_action("open the box", "place the box") and not same_action("idle", "fold it")
+    assert same_object("cardboard box", "fold the box flap", "flap", "press the flap")
+    assert not same_object("black cable", "insert the cable", "black case", "close the case")
+
+
+def test_idle_step_is_not_asked_twice(wide_video):
+    backend = ScriptedBackend('{"object": "", "instruction": "idle"}')
     assert StepCaptioner(backend=backend)(wide_video, step_track(), 0, 60)["task"] == "idle"
     assert [c[0] for c in backend.calls] == ["caption"]
 
