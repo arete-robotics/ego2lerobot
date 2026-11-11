@@ -22,6 +22,21 @@ class Segment:
         return asdict(self)
 
 
+def hand_runs(track: HandTrack, gap_seconds: float = 1.0) -> list[tuple[int, int]]:
+    """(start, end) frame ranges with a hand in view, gaps shorter than `gap_seconds` bridged."""
+    runs, start, last = [], None, None
+    for i in np.flatnonzero(track.score.max(1) > 0):
+        if start is None:
+            start = i
+        elif i - last > gap_seconds * track.fps:
+            runs.append((int(start), int(last) + 1))
+            start = i
+        last = i
+    if start is not None:
+        runs.append((int(start), int(last) + 1))
+    return runs
+
+
 def find_segments(track: HandTrack, min_seconds: float = 3.0, max_seconds: float = 15.0, gap_seconds: float = 1.0,
                   min_coverage: float = 0.0) -> list[Segment]:
     """Stretches with a hand in view; gaps shorter than `gap_seconds` are bridged, and stretches longer than
@@ -29,18 +44,8 @@ def find_segments(track: HandTrack, min_seconds: float = 3.0, max_seconds: float
     fps = track.fps
     present = track.score.max(1) > 0
     both = track.score.min(1) > 0
-    runs, start, last = [], None, None
-    for i in np.flatnonzero(present):
-        if start is None:
-            start = i
-        elif i - last > gap_seconds * fps:
-            runs.append((start, last + 1))
-            start = i
-        last = i
-    if start is not None:
-        runs.append((start, last + 1))
     segments = []
-    for a, b in runs:
+    for a, b in hand_runs(track, gap_seconds):
         length = (b - a) / fps
         if length < min_seconds:
             continue

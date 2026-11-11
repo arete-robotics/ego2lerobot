@@ -8,6 +8,17 @@ from pathlib import Path
 
 import numpy as np
 
+# Nominal lens models for uncalibrated cameras: (model, horizontal field of view in degrees). These are NOT
+# calibrations. They come from a spec-sheet number plus an assumed projection, and can be off by several percent in
+# focal length; a checkerboard calibration (OpenCV fisheye model, saved as --intrinsics JSON) always wins.
+PRESETS = {
+    # Ultra-wide action cameras sold as "155° FOV" (for example the 1/1.3-inch-sensor models whose spec pages list
+    # "FOV 155°"), recorded in their widest mode with stabilisation and distortion correction off.
+    # Assumptions: the 155° is the diagonal of the full 4:3 frame; the lens is equidistant (r = f·θ, k1–k4 = 0);
+    # 16:9 video is a centre crop of the full width. Horizontal FOV = 155° × 4/5 (half-width / half-diagonal) = 124°.
+    "action-ultrawide": ("fisheye", 124.0),
+}
+
 
 @dataclass(frozen=True)
 class Camera:
@@ -38,6 +49,20 @@ class Camera:
         """A distortion-free guess for videos without calibration, from the horizontal field of view."""
         f = (width / 2) / math.tan(math.radians(hfov_degrees) / 2)
         return cls(width=width, height=height, fx=f, fy=f, cx=width / 2, cy=height / 2)
+
+    @classmethod
+    def from_fisheye_fov(cls, width: int, height: int, hfov_degrees: float) -> Camera:
+        """A nominal equidistant fisheye (k1–k4 = 0, r = f·θ) for uncalibrated ultra-wide video."""
+        f = (width / 2) / (math.radians(hfov_degrees) / 2)
+        return cls(width=width, height=height, fx=f, fy=f, cx=width / 2, cy=height / 2, model="fisheye")
+
+    @classmethod
+    def preset(cls, name: str, width: int, height: int) -> Camera:
+        """One of PRESETS, sized to the video."""
+        if name not in PRESETS:
+            raise ValueError(f"unknown camera preset {name!r}; choose from {', '.join(PRESETS)}")
+        model, hfov = PRESETS[name]
+        return cls.from_fisheye_fov(width, height, hfov) if model == "fisheye" else cls.from_fov(width, height, hfov)
 
     def scaled(self, width: int, height: int) -> Camera:
         sx, sy = width / self.width, height / self.height

@@ -15,6 +15,7 @@ dependencies = ["lerobot[dataset]>=0.4", "mediapipe>=0.10", "av", "numpy", "pill
 
 [project.optional-dependencies]
 caption = ["mlx-vlm>=0.3"]
+caption-cuda = ["transformers>=4.57", "accelerate"]  # Qwen3-VL on Linux/NVIDIA; or use --caption-url with a vLLM server
 test = ["pytest"]
 
 [project.scripts]

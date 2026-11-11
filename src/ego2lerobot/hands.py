@@ -64,8 +64,12 @@ class HandTrack:
         return {"frames": len(s), "any_hand": round(float((s.max(1) > 0).mean()), 3), "two_hands": round(float((s.min(1) > 0).mean()), 3)}
 
 
-def detect(video: str | Path, min_confidence: float = 0.4, progress: bool = True) -> HandTrack:
-    """Run MediaPipe Hand Landmarker (video mode, tracking between frames) on every frame."""
+def detect(video: str | Path, min_confidence: float = 0.4, progress: bool = True, view=None) -> HandTrack:
+    """Run MediaPipe Hand Landmarker (video mode, tracking between frames) on every frame.
+
+    `view` (e.g. rectify.PinholeView) changes what MediaPipe sees: frames are decoded at `view.size`, passed through
+    `view.image`, and keypoints come back to original pixels through `view.to_source`.
+    """
     import mediapipe as mp
     from mediapipe.tasks.python import BaseOptions, vision
 
@@ -79,10 +83,14 @@ def detect(video: str | Path, min_confidence: float = 0.4, progress: bool = True
     width, height = stream.codec_context.width, stream.codec_context.height
     dw = min(DETECT_WIDTH, width)
     dh = round(height * dw / width / 2) * 2
+    if view is not None:
+        dw, dh = view.size
     kp, world, score = [], [], []
     with vision.HandLandmarker.create_from_options(options) as landmarker:
         for n, frame in enumerate(container.decode(stream)):
             image = frame.to_ndarray(format="rgb24", width=dw, height=dh)
+            if view is not None:
+                image = view.image(image)
             result = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=image), int(n * 1000 / fps))
             f_kp = np.zeros((2, 21, 2), np.float32)
             f_world = np.zeros((2, 21, 3), np.float32)
@@ -93,7 +101,10 @@ def detect(video: str | Path, min_confidence: float = 0.4, progress: bool = True
                 side = 0 if hand[0].category_name == "Left" else 1
                 if hand[0].score <= f_score[side]:
                     continue
-                f_kp[side] = [(p.x * width, p.y * height) for p in lms]
+                if view is None:
+                    f_kp[side] = [(p.x * width, p.y * height) for p in lms]
+                else:
+                    f_kp[side] = view.to_source(np.array([(p.x * dw, p.y * dh) for p in lms]))
                 f_world[side] = [(p.x, p.y, p.z) for p in wlms]
                 f_score[side] = hand[0].score
             kp.append(f_kp)
