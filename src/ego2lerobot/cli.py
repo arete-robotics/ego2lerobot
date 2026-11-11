@@ -2,6 +2,7 @@
 
   ego2lerobot run VIDEO [VIDEO ...] --out DATASET [--intrinsics cam.json | --hfov 100] [--caption]
   ego2lerobot detect VIDEO HANDS.npz
+  ego2lerobot stereo LEFT RIGHT --calib stereo.json --out DATASET   (see ego2lerobot stereo -h)
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from .camera import Camera
 from .export import Episode, write_dataset
 from .hands import HandTrack, detect
 from .segments import find_segments, spread
+from . import stereo_cli
 
 
 def video_size(video: Path) -> tuple[int, int]:
@@ -94,8 +96,11 @@ def main(argv=None) -> None:
     d = sub.add_parser("detect", help="hand detections for one video")
     d.add_argument("video", type=Path)
     d.add_argument("out", type=Path)
+    stereo_cli.add_parser(sub)
 
     args = ap.parse_args(argv)
+    if args.cmd == "stereo":
+        return stereo_cli.run(args)
     if args.cmd == "run":
         run(args)
     else:
