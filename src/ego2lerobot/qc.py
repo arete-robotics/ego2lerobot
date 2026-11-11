@@ -348,8 +348,9 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
     o = r["overall"]
     L, R = o.get("left", {}), o.get("right", {})
     cap = o["captions"]
-    captions = (f"{cap['captioned']}/{cap['episodes']} episodes, {cap['with_steps']} with sub-steps, "
-                f"{cap['idle_dropped']} dropped as idle") if cap["enabled"] else "off (default task text)"
+    captions = (f"{cap['captioned']}/{cap['episodes']} episodes, "
+                + (f"{cap['with_steps']} with sub-steps, " if cap["with_steps"] else "")
+                + f"{cap['idle_dropped']} dropped as idle") if cap["enabled"] else "off (default task text)"
     ver = cap.get("verification")
     check = (f"{ver['verified']}/{ver['checked']} verified ({_pct(ver['rate'])}); {ver['flagged']} flagged as not "
              f"verified" + (f", {ver['unverified_dropped']} dropped" if ver.get("unverified_dropped") else "")
