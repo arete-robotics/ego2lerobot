@@ -1,6 +1,7 @@
 """ego2lerobot: first-person video → LeRobot dataset with hand keypoints, wrist actions and language.
 
   ego2lerobot run VIDEO [VIDEO ...] --out DATASET [--intrinsics cam.json | --hfov 100 | --camera action-ultrawide] [--caption]
+                  [--segment action|fixed]
   ego2lerobot detect VIDEO HANDS.npz
   ego2lerobot prepare VIDEO [VIDEO ...] --out PROXY_DIR [--width 1920 --fps 30]   (4K/60 fps → lighter proxy)
   ego2lerobot qc DATASET                                                          (qc_report.json / .md / .html)
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,7 +19,8 @@ import av
 from .camera import Camera
 from .export import Episode, write_dataset
 from .hands import HandTrack, detect
-from .segments import find_segments, spread
+from .segments import find_segments, find_steps, spread
+from .signals import grasp_events
 from . import stereo_cli
 
 
@@ -52,14 +55,31 @@ def cached_track(video: Path, cache: Path, view=None) -> HandTrack:
     return track
 
 
+def portable(path: Path, base: Path) -> str:
+    """`path` relative to `base` when it sits next to it (at most one level up), else the file name only.
+
+    meta/run.json travels with the dataset, so it must not carry absolute local paths (user names, folder names)."""
+    rel = os.path.relpath(Path(path).resolve(), Path(base).resolve())
+    return Path(path).name if os.path.isabs(rel) or rel.startswith(os.pardir + os.sep + os.pardir) else rel
+
+
+def events_between(events: dict, start: int, end: int, fps: float) -> list[dict]:
+    """Grasp and release events inside [start, end), with times in seconds from `start`."""
+    return sorted(({"hand": side, "event": e["event"], "t": round((e["frame"] - start) / fps, 3)}
+                   for side, evs in events.items() for e in evs if start <= e["frame"] < end), key=lambda e: e["t"])
+
+
 def run(args) -> None:
     cache = args.cache or args.out.with_name(args.out.name + "_cache")
     cache.mkdir(parents=True, exist_ok=True)
+    action = args.segment == "action"
+    min_seconds = args.min_seconds if args.min_seconds is not None else (2.0 if action else 3.0)
     captioner = None
     if args.caption:
-        from .caption import Captioner
-        captioner = Captioner(args.caption_model, backend=args.caption_backend, url=args.caption_url)
-    episodes, videos, dropped = [], [], []
+        from .caption import Captioner, StepCaptioner
+        captioner = (StepCaptioner if action else Captioner)(args.caption_model, backend=args.caption_backend,
+                                                             url=args.caption_url)
+    episodes, videos, dropped, grasp = [], [], [], {}
     for video in args.videos:
         camera = camera_for(video, args)
         view = None
@@ -67,31 +87,71 @@ def run(args) -> None:
             from .rectify import PinholeView
             view = PinholeView(camera, args.rectify)
         track = cached_track(video, cache, view)
-        videos.append({"name": video.name, "path": str(video.resolve()),
-                       "track": str(track_path(video, cache, view).resolve()), "camera": asdict(camera)})
-        segments = find_segments(track, args.min_seconds, args.max_seconds, min_coverage=args.min_coverage)
+        events = grasp_events(track)
+        grasp[video.name] = {"fps": track.fps, **events}
+        entry = {"name": video.name, "path": portable(video, args.out), "track": track_path(video, cache, view).name,
+                 "camera": asdict(camera)}
+        side = video.with_suffix(".source.json")  # written by `ego2lerobot prepare`
+        if side.exists():
+            src = json.loads(side.read_text())
+            entry["original"] = {k: src[k] for k in ("source", "width", "height", "fps", "seconds", "codec") if k in src}
+        if action:
+            judge = None
+            if captioner:
+                def judge(frame, lo, hi, video=video, track=track):
+                    return captioner.boundary(video, track, frame, lo, hi)
+            segments, entry["boundaries"] = find_steps(track, judge, min_seconds, args.max_seconds, events=events)
+            entry["steps"] = [{"start": s.start, "end": s.end, "hand_coverage": s.hand_coverage, "cuts": s.cuts}
+                              for s in segments]
+            segments = [s for s in segments if s.hand_coverage >= args.min_coverage]
+        else:
+            segments = find_segments(track, min_seconds, args.max_seconds, min_coverage=args.min_coverage)
+        videos.append(entry)
         if args.per_video:
             segments = spread(segments, args.per_video)
         for seg in segments:
             info = {"seconds": round(seg.seconds(track.fps), 2), "hand_coverage": seg.hand_coverage}
+            if action:
+                info["cuts"] = seg.cuts
             task = args.default_task
             if captioner:
-                caption = captioner(video, seg.start, seg.end, track.fps)
+                caption = captioner(video, track, seg.start, seg.end) if action else captioner(video, seg.start, seg.end, track.fps)
+                reason = None
                 if caption.get("task", "").strip().lower() == "idle":
-                    dropped.append({"video": video.name, "start": seg.start, "end": seg.end, "reason": "caption said idle"})
+                    reason = "caption said idle"
+                elif args.drop_unverified and caption.get("verified") is False:
+                    reason = "caption not verified"
+                if reason:
+                    dropped.append({"video": video.name, "start": seg.start, "end": seg.end, "reason": reason,
+                                    "task": caption.get("task")})
                     continue
                 task = caption.get("task") or task
-                info.update({k: caption[k] for k in ("steps", "objects") if k in caption})
+                info.update({k: caption[k] for k in ("steps", "object", "objects", "verified", "confidence", "check",
+                                                      "caption_problems") if k in caption})
+            info["grasp_events"] = events_between(events, seg.start, seg.end, track.fps)
             episodes.append(Episode(video, camera, track, seg, task.strip(), info))
-        print(f"{video.name}: {len(segments)} episodes", flush=True)
+        print(f"{video.name}: {len(segments)} {'steps' if action else 'episodes'}", flush=True)
     write_dataset(episodes, args.out, args.repo_id, args.width, args.step, args.preview)
+    write_grasp_events(args.out, grasp)
     from .qc import write_report, write_run_log
-    settings = {"min_seconds": args.min_seconds, "max_seconds": args.max_seconds, "gap_seconds": 1.0,
+    settings = {"segment": args.segment, "min_seconds": min_seconds, "max_seconds": args.max_seconds, "gap_seconds": 1.0,
                 "min_coverage": args.min_coverage, "per_video": args.per_video, "step": args.step, "width": args.width,
-                "rectify": args.rectify}
+                "rectify": args.rectify, "drop_unverified": args.drop_unverified}
     write_run_log(args.out, settings, videos, dropped, bool(args.caption), args.default_task)
     report = write_report(args.out, cache)
     print(f"QC report: {args.out / 'qc_report.md'} ({report['overall']['flagged_episodes']} episodes with warnings)")
+
+
+def write_grasp_events(dataset: Path, grasp: dict) -> None:
+    """meta/grasp_events.json: per video and hand, when the hand closes (grasp) and opens (release)."""
+    from . import signals
+    about = ("Per hand, frames where the grip closes (grasp) or opens (release). Grip aperture = thumb-tip to index-tip "
+             "distance / palm length from MediaPipe's metric hand shape; closed below `close`, open above `open`, a state "
+             "must last `min_state_s`; no event is emitted across a gap longer than `max_gap_s` without the hand. "
+             "Frames and times refer to the source video.")
+    (dataset / "meta" / "grasp_events.json").write_text(json.dumps(
+        {"about": about, "thresholds": {"close": signals.CLOSE, "open": signals.OPEN, "min_state_s": signals.MIN_STATE_S,
+                                        "max_gap_s": signals.MAX_GAP_S}, "videos": grasp}, indent=1))
 
 
 def main(argv=None) -> None:
@@ -115,8 +175,14 @@ def main(argv=None) -> None:
     r.add_argument("--caption-url", help="OpenAI-compatible server, e.g. http://localhost:8000/v1 (vLLM)")
     r.add_argument("--caption-model", help="model id (default depends on the backend; see caption.DEFAULT_MODELS)")
     r.add_argument("--default-task", default="manipulate objects with the hands")
-    r.add_argument("--min-seconds", type=float, default=3.0)
-    r.add_argument("--max-seconds", type=float, default=15.0)
+    r.add_argument("--segment", choices=["action", "fixed"], default="action",
+                   help="action: cut at action boundaries (hand signals checked by the captioner, or signals alone "
+                        "without --caption); fixed: the earlier equal splits and one-question captions, to reproduce "
+                        "datasets made before sub-steps")
+    r.add_argument("--min-seconds", type=float, help="shortest step (default 2 s with --segment action, 3 s with fixed)")
+    r.add_argument("--max-seconds", type=float, default=15.0, help="longest step; longer ones are split")
+    r.add_argument("--drop-unverified", action="store_true",
+                   help="leave out steps whose caption fails verification (default: keep them, marked verified: false)")
     r.add_argument("--min-coverage", type=float, default=0.7, help="share of frames that must show a hand")
     r.add_argument("--per-video", type=int, default=0, help="keep at most N episodes per video, spread out (0 = all)")
     r.add_argument("--width", type=int, default=640)

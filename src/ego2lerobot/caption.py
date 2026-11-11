@@ -1,12 +1,21 @@
-"""Language instructions for episodes from a vision-language model (Qwen3-VL, Apache 2.0), with three backends:
+"""Language instructions from a vision-language model (Qwen3-VL, Apache 2.0), with three backends:
 
   mlx           Apple silicon, through mlx-vlm.          pip install "ego2lerobot[caption]"
   transformers  Linux + NVIDIA GPU (or any torch device). pip install "ego2lerobot[caption-cuda]"
   openai        Any OpenAI-compatible server, e.g. vLLM:  vllm serve Qwen/Qwen3-VL-8B-Instruct  (stdlib only)
 
-Every backend gets the same keyframes (JPEG, 448 px wide), the same prompt, greedy decoding and at most MAX_TOKENS
-new tokens, and the reply goes through the same parser, so the output schema is identical:
-{"task": str, "steps": [str], "objects": [str]}. Without --caption, episodes get the `--default-task` text.
+Every backend gets the same images (JPEG, 448 px wide), the same prompts, greedy decoding and at most MAX_TOKENS new
+tokens, and every reply goes through the same parser, so the output schema does not depend on the backend.
+
+StepCaptioner (default) labels sub-steps. It answers three questions, each with its own prompt:
+  boundary   frames just before and just after a candidate cut: does a new step start here?   (used by find_steps)
+  caption    three full frames and three close-ups around the hands: an imperative instruction naming the object
+  verify     four other close-ups and the proposed instruction: is that the object in the hands, and the action?
+and returns {"task", "object", "objects", "verified", "confidence", "check", "caption_problems"}. A caption that fails
+the check or the format rules is kept but marked verified: false.
+
+Captioner is the earlier one-question labeller ({"task", "steps", "objects"} from four frames), kept so that datasets
+made with `--segment fixed` can be reproduced. Without --caption, episodes get the `--default-task` text.
 """
 from __future__ import annotations
 
@@ -18,9 +27,12 @@ import re
 import sys
 import tempfile
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 
 import av
+import numpy as np
+from PIL import Image
 
 DEFAULT_MODELS = {
     "mlx": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
@@ -176,3 +188,227 @@ class Captioner:
             images = keyframes(video, start, end, fps, self.frames, Path(tmp))
             text = self.backend.generate(images, PROMPT.format(n=len(images)))
         return normalize(parse(text))
+
+
+# ---------- sub-steps: boundary check, caption with hand close-ups, verification ----------
+
+BOUNDARY_PROMPT = """These {n} frames come from a camera on a worker's head, in time order. Frames 1 to {k} are from the second just before a moment T, frames {k1} to {n} from the second just after it.
+Did the worker's hands start a new step at T? A new step means a different action or a different object: for example the hands stop folding and start placing, put an object down, pick up a new object, or open or close something. Continuing or repeating the same motion on the same object is the same step, even if the hands or the camera move.
+Reply with JSON only:
+{{"before": "<what the hands do before T: verb and object>", "after": "<what the hands do after T: verb and object>", "new_step": true or false}}"""
+
+STEP_PROMPT = """Images 1 to {n} are full views from a camera on a worker's head during one short step of hand work, in time order. Images {n1} to {m} are close-ups around the hands at the same moments.
+Say what the hands do in this step. Only objects the hands hold or touch count: finished products, machines and stacks in the background are not part of the step unless the hands touch them. If several things happen, describe the main one.
+Reply with JSON only, in English:
+{{"object": "<the object the hands manipulate, 1 to 4 words>",
+ "instruction": "<one imperative instruction for a robot, at most 12 words, starting with a verb (pick up, place, fold, insert, press, open, turn ...) and naming the object>",
+ "objects": ["<everything the hands touch>"]}}
+If the hands are not manipulating anything, use "instruction": "idle"."""
+
+VERIFY_PROMPT = """These {n} images are close-ups around a worker's hands, in time order, from a camera on the worker's head.
+Proposed instruction for what the hands do: "{instruction}"
+First look at what the hands hold and how they move, then check the instruction against it.
+Reply with JSON only:
+{{"in_hands": "<the object the hands hold or touch>", "motion": "<what the hands do, 2 to 6 words>",
+ "object_matches": "yes" or "no", "action_matches": "yes" or "no"}}
+Answer "no" for object_matches if the instruction names an object the hands do not hold or touch, and "no" for action_matches if the hands do not do that action (for example the instruction says place or close but the hands fold, or the reverse). Things only in the background do not count."""
+
+CAPTION_AT = (0.2, 0.5, 0.8)  # where in the step the caption frames are taken (share of its length)
+VERIFY_AT = (0.1, 0.37, 0.63, 0.9)  # the verification close-ups: other moments, so the two passes do not share images
+BOUNDARY_AT = (-1.2, -0.4, 0.4, 1.2)  # seconds around a candidate cut
+
+VERBS = frozenset("""
+adjust align apply arrange assemble attach bag bend bring brush buckle build bundle button carry check clamp clean
+clear clip close coil collect comb connect count cover crease crimp cut detach dip disassemble discard disconnect
+dispose drill drop dry empty examine fasten feed fetch file fill fit flatten flip fold form gather glue grab grasp
+grip hammer hand hang hold hook insert inspect install join knot label lay lift load lock loosen lower mark measure
+mix mount move nail open organise organize pack pass peel pick pinch place plug polish position pour prepare press
+pull punch push put raise reach release remove replace return rinse roll rotate route rub sand scan scoop scrape
+screw seal secure separate set shake shape shift slide smooth solder sort spray spread squeeze stack staple stick
+stir store straighten stretch strip swap sweep take tap tape tear thread throw tie tighten touch toss transfer trim
+tuck turn twist type uncap uncoil uncover unfasten unfold unhook unlock unpack unplug unroll unscrew unstack untie
+unwind unwrap unzip use weigh wind wipe wrap zip
+""".split())
+NOT_IMPERATIVE = frozenset("a an the this that it its he she they we i you someone person worker workers hand hands "
+                           "both left right".split())
+
+
+def base_verb(word: str) -> str | None:
+    """The base form of a verb written as -ing, -s/-es or -ed, if it is in VERBS."""
+    w = word.lower()
+    if w in VERBS:
+        return w
+    for suffix in ("ing", "es", "s", "ed", "d"):
+        if w.endswith(suffix) and len(w) > len(suffix) + 1:
+            stem = w[: -len(suffix)]
+            for guess in (stem, stem + "e", stem[:-1] if len(stem) > 2 and stem[-1] == stem[-2] else ""):
+                if guess in VERBS:
+                    return guess
+    return None
+
+
+def imperative(text: str) -> tuple[str, list[str]]:
+    """(instruction, problems): the text as an imperative starting with a known verb, lower case, no full stop.
+
+    "Assembling cardboard box" becomes "assemble cardboard box"; text that does not start with a verb is returned
+    as it is, with a problem noted."""
+    words = re.sub(r"\s+", " ", text.strip().strip(".").strip()).split(" ")
+    if not words or not words[0]:
+        return "", ["empty instruction"]
+    first = words[0].lower()
+    verb = base_verb(first)
+    if verb is None or first in NOT_IMPERATIVE:
+        return " ".join(words), [f"not an imperative: starts with '{words[0]}'"]
+    return " ".join([verb] + words[1:]), []
+
+
+def names_object(instruction: str, obj: str) -> bool:
+    """True if a content word of `obj` (or its singular) appears in `instruction`."""
+    said = re.findall(r"[a-z]+", instruction.lower())
+    for word in re.findall(r"[a-z]+", obj.lower()):
+        if len(word) < 3 or word in NOT_IMPERATIVE:
+            continue
+        stem = word[:-1] if word.endswith("s") and len(word) > 3 else word
+        if any(w.startswith(stem) for w in said):
+            return True
+    return False
+
+
+def yes(value) -> bool:
+    return value is True or (isinstance(value, str) and value.strip().lower() in ("yes", "true", "y"))
+
+
+class FrameReader:
+    """Frames of one video by index, decoded in order (seeking only for jumps), scaled to `width` pixels."""
+
+    def __init__(self, video: str | Path, fps: float, width: int = 1280, keep: int = 48):
+        self.video, self.fps, self.width, self.keep = Path(video), fps, width, keep
+        self.cache: OrderedDict[int, Image.Image] = OrderedDict()
+        self.container = self.frames = None
+        self.position = -1
+
+    def __call__(self, indices) -> dict[int, Image.Image]:
+        out = {}
+        for i in sorted(set(int(i) for i in indices)):
+            if i not in self.cache:
+                self._decode_to(i)
+            if i in self.cache:
+                out[i] = self.cache[i]
+        return out
+
+    def _decode_to(self, i: int) -> None:
+        if self.container is None:
+            self.container = av.open(str(self.video))
+            self.stream = self.container.streams.video[0]
+            self.stream.thread_type = "AUTO"
+            start = self.stream.start_time
+            self.origin = float(start * self.stream.time_base) if start is not None else 0.0
+        if self.frames is None or i <= self.position or i - self.position > 2 * self.fps:
+            self.container.seek(int(max(0.0, self.origin + i / self.fps - 1.0) / self.stream.time_base), stream=self.stream)
+            self.frames, self.position = self.container.decode(self.stream), -1
+        for frame in self.frames:
+            j = round((float(frame.pts * self.stream.time_base) - self.origin) * self.fps)
+            self.position = j
+            if j >= i:
+                height = round(frame.height * self.width / frame.width)
+                self.cache[i] = Image.fromarray(frame.to_ndarray(format="rgb24", width=self.width, height=height))
+                if len(self.cache) > self.keep:
+                    self.cache.popitem(last=False)
+                return
+
+    def close(self) -> None:
+        if self.container is not None:
+            self.container.close()
+        self.container = self.frames = None
+
+
+def hand_box(track, i: int, pad: float = 0.6, min_side: float = 0.4, aspect: float = 4 / 3):
+    """(left, top, right, bottom) around the hands at frame i, in the track's pixels, or None without a hand.
+
+    Uses the nearest frame within half a second that has a hand. The box is padded by `pad` times the hands' size so
+    that the object in the hands is included, is at least `min_side` of the frame height, and has a 4:3 shape."""
+    n, reach = len(track.score), round(0.5 * track.fps)
+    for d in sorted(range(-reach, reach + 1), key=abs):
+        j = i + d
+        if 0 <= j < n and (track.score[j] > 0).any():
+            pts = track.kp[j][track.score[j] > 0].reshape(-1, 2)
+            break
+    else:
+        return None
+    (x0, y0), (x1, y1) = pts.min(0), pts.max(0)
+    size = max(x1 - x0, y1 - y0)
+    h = max(y1 - y0 + 2 * pad * size, min_side * track.height)
+    w = max(x1 - x0 + 2 * pad * size, h * aspect)
+    w, h = min(w, track.width), min(max(h, w / aspect), track.height)
+    left = float(np.clip((x0 + x1 - w) / 2, 0, track.width - w))
+    top = float(np.clip((y0 + y1 - h) / 2, 0, track.height - h))
+    return left, top, left + w, top + h
+
+
+class StepCaptioner:
+    """Boundary checks, instructions and verification for sub-steps; see the module docstring."""
+
+    def __init__(self, model: str | None = None, backend="auto", url: str | None = None, width: int = 448):
+        self.backend = make_backend(backend, model, url) if isinstance(backend, str) else backend
+        self.width = width
+        self.reader: FrameReader | None = None
+
+    def frames(self, video, track, indices) -> dict[int, Image.Image]:
+        if self.reader is None or self.reader.video != Path(video):
+            if self.reader is not None:
+                self.reader.close()
+            self.reader = FrameReader(video, track.fps)
+        return self.reader([min(max(int(i), 0), len(track.score) - 1) for i in indices])
+
+    def closeup(self, image: Image.Image, track, i: int) -> Image.Image:
+        box = hand_box(track, i)
+        if box is None:
+            return image
+        scale = image.width / track.width
+        return image.crop(tuple(round(v * scale) for v in box))
+
+    def ask(self, images: list[Image.Image], prompt: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for k, image in enumerate(images):
+                path = Path(tmp) / f"{k}.jpg"
+                image.resize((self.width, round(image.height * self.width / image.width))).save(path, quality=90)
+                paths.append(str(path))
+            reply = parse(self.backend.generate(paths, prompt))
+        return reply if isinstance(reply, dict) else {}
+
+    def boundary(self, video, track, at: int, lo: int, hi: int) -> dict:
+        """{"new_step": bool, "before": str, "after": str} for a candidate cut at frame `at` inside [lo, hi)."""
+        idx = [min(max(round(at + s * track.fps), lo), hi - 1) for s in BOUNDARY_AT]
+        got = self.frames(video, track, idx)
+        images = [got[i] for i in idx if i in got]
+        reply = self.ask(images, BOUNDARY_PROMPT.format(n=len(images), k=len(images) // 2, k1=len(images) // 2 + 1))
+        return {"new_step": yes(reply.get("new_step")), "before": str(reply.get("before", "")),
+                "after": str(reply.get("after", ""))}
+
+    def __call__(self, video, track, start: int, end: int) -> dict:
+        span = end - start
+        at = [start + int(span * f) for f in CAPTION_AT]
+        check_at = [start + int(span * f) for f in VERIFY_AT]
+        got = self.frames(video, track, at + check_at)
+        at, check_at = [i for i in at if i in got], [i for i in check_at if i in got]
+        n = len(at)
+        reply = self.ask([got[i] for i in at] + [self.closeup(got[i], track, i) for i in at],
+                         STEP_PROMPT.format(n=n, n1=n + 1, m=2 * n))
+        obj = str(reply.get("object") or "").strip()
+        objects = normalize({"objects": reply.get("objects")})["objects"]
+        raw = str(reply.get("instruction") or reply.get("task") or "").strip()
+        if raw.lower().strip(". ") == "idle":
+            return {"task": "idle", "object": obj, "objects": objects}
+        task, problems = imperative(raw)
+        if not names_object(task, obj):
+            problems.append("the instruction does not name the object" if obj else "no object given")
+        check = self.ask([self.closeup(got[i], track, i) for i in check_at],
+                         VERIFY_PROMPT.format(n=len(check_at), instruction=task))
+        object_ok, action_ok = yes(check.get("object_matches")), yes(check.get("action_matches"))
+        return {"task": task, "object": obj, "objects": objects,
+                "verified": object_ok and action_ok and not problems,
+                "confidence": round((object_ok + action_ok + (not problems)) / 3, 2),
+                "check": {"in_hands": str(check.get("in_hands", "")), "motion": str(check.get("motion", "")),
+                          "object_matches": object_ok, "action_matches": action_ok},
+                "caption_problems": problems}

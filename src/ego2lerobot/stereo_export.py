@@ -11,7 +11,7 @@ import av
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .export import LEFT_COLOUR, RIGHT_COLOUR
+from .export import LEFT_COLOUR, RIGHT_COLOUR, remove_empty_dirs
 from .export import features as mono_features
 from .hands import BONES, JOINTS, SIDES, end_effector
 from .segments import Segment
@@ -212,6 +212,7 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
                      "any_hand": round(float(valid.any(1).mean()), 3), "two_hands": round(float(valid.all(1).mean()), 3),
                      "source": source, **ep.info})
     dataset.finalize()
+    remove_empty_dirs(out / "images")
     meta_dir = out / "meta"
     for index, imu, t0, t1 in imu_slices:
         (meta_dir / "imu").mkdir(exist_ok=True)

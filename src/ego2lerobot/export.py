@@ -73,6 +73,18 @@ def frames_between(video: Path, start: int, end: int, fps: float, width: int, he
     container.close()
 
 
+def remove_empty_dirs(root: Path) -> None:
+    """Remove `root` and the folders below it if they hold no files (LeRobot leaves an empty images/<camera>/ behind
+    when frames go into videos)."""
+    if not root.is_dir():
+        return
+    for folder in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        if not any(folder.iterdir()):
+            folder.rmdir()
+    if not any(root.iterdir()):
+        root.rmdir()
+
+
 def write_dataset(episodes: list[Episode], out: str | Path, repo_id: str, width: int = 640, step: int = 2,
                   preview_dir: str | Path | None = None, previews: int = 12) -> dict:
     """Write `episodes` to a fresh LeRobot dataset at `out`, keeping every `step`-th frame."""
@@ -134,6 +146,7 @@ def write_dataset(episodes: list[Episode], out: str | Path, repo_id: str, width:
                      "any_hand": round(float((valid.sum(1) > 0).mean()), 3), "two_hands": round(float((valid.sum(1) == 2).mean()), 3),
                      "source": {"video": ep.video.name, "start_frame": ep.segment.start, "end_frame": ep.segment.end}, **ep.info})
     dataset.finalize()
+    remove_empty_dirs(out / "images")
     (out / "meta" / "episodes_info.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False))
     summary = {"episodes": len(meta), "frames": sum(m["frames"] for m in meta), "fps": fps,
                "minutes": round(sum(m["frames"] for m in meta) / fps / 60, 1)}

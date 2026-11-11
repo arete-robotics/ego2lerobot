@@ -90,8 +90,8 @@ def hand_summary(c: dict, s: int) -> dict:
     }
 
 
-def episode_flags(hands: list[dict], any_hand: float | None) -> list[str]:
-    flags = []
+def episode_flags(hands: list[dict], any_hand: float | None, verified: bool | None = None) -> list[str]:
+    flags = ["caption not verified"] if verified is False else []
     if any_hand is not None and 1 - any_hand > FLAGS["missing"]:
         flags.append(f"no hand in {1 - any_hand:.0%} of frames")
     checks = (("cut_by_border", "cut", "cut by border"), ("distance_implausible", "distance", "implausible distance"),
@@ -120,8 +120,12 @@ def problem_ranges(c: dict, fps: float, offset_s: float) -> list[dict]:
 
 # ---------- segment audit on the full hand track ----------
 
-def audit_segments(track: HandTrack, settings: dict, exported: set, idle: set) -> list[dict]:
-    """Every hand-activity stretch in a video and what happened to it: kept, or dropped and why."""
+def audit_segments(track: HandTrack, settings: dict, exported: set, idle: set, steps: list[dict] | None = None,
+                   unverified: set = frozenset()) -> list[dict]:
+    """Every hand-activity stretch in a video and what happened to it: kept, or dropped and why.
+
+    `steps` are the steps `run --segment action` found (from meta/run.json); without them the equal-split segments
+    are recomputed from the track, as `run --segment fixed` makes them."""
     s = {**DEFAULTS, **settings}
     fps = track.fps
     out = []
@@ -129,18 +133,22 @@ def audit_segments(track: HandTrack, settings: dict, exported: set, idle: set) -
         if (b - a) / fps < s["min_seconds"]:
             out.append({"start": a, "end": b, "kept": False, "kind": "too short",
                         "reason": f"hands in view only {(b - a) / fps:.1f} s (< {s['min_seconds']:g} s)"})
-    for seg in find_segments(track, s["min_seconds"], s["max_seconds"], s["gap_seconds"], 0.0):
-        key = (seg.start, seg.end)
+    if steps is None:
+        steps = [seg.to_dict() for seg in find_segments(track, s["min_seconds"], s["max_seconds"], s["gap_seconds"], 0.0)]
+    for seg in steps:
+        key, coverage = (seg["start"], seg["end"]), seg["hand_coverage"]
         if key in exported:
             kind, reason = None, None
-        elif seg.hand_coverage < s["min_coverage"]:
-            kind, reason = "low hand coverage", f"hand coverage {seg.hand_coverage:.2f} < {s['min_coverage']:g}"
+        elif coverage < s["min_coverage"]:
+            kind, reason = "low hand coverage", f"hand coverage {coverage:.2f} < {s['min_coverage']:g}"
         elif key in idle:
             kind = reason = "caption said idle"
+        elif key in unverified:
+            kind = reason = "caption not verified"
         else:
             kind, reason = "not selected", "not selected (--per-video) or skipped at export"
-        out.append({"start": seg.start, "end": seg.end, "kept": reason is None, "kind": kind, "reason": reason,
-                    "hand_coverage": seg.hand_coverage})
+        out.append({"start": key[0], "end": key[1], "kept": reason is None, "kind": kind, "reason": reason,
+                    "hand_coverage": coverage})
     for d in out:
         d["start_s"], d["end_s"] = round(d["start"] / fps, 2), round(d["end"] / fps, 2)
     return sorted(out, key=lambda d: d["start"])
@@ -191,16 +199,30 @@ def _load_frames(dataset: Path) -> dict[int, dict[str, np.ndarray]]:
     return out
 
 
-def _video_facts(entry: dict, track: HandTrack | None) -> dict:
+def _video_facts(entry: dict, track: HandTrack | None, dataset: Path) -> dict:
     facts = {"video": entry.get("name") or Path(entry.get("path", "?")).name}
     if track is not None:
         facts.update(width=track.width, height=track.height, fps=round(track.fps, 3), frames=len(track.score),
                      seconds=round(len(track.score) / track.fps, 2))
-    side = Path(entry.get("path", "")).with_suffix(".source.json")
-    if entry.get("path") and side.exists():  # written by `ego2lerobot prepare`
-        src = json.loads(side.read_text())
-        facts["original"] = {k: src[k] for k in ("source", "width", "height", "fps", "seconds", "codec") if k in src}
+    if entry.get("original"):  # copied from `ego2lerobot prepare`'s side file by `run`
+        facts["original"] = entry["original"]
+    elif entry.get("path"):  # older run.json: look for the side file next to the video
+        side = (dataset / entry["path"]).with_suffix(".source.json")
+        if side.exists():
+            src = json.loads(side.read_text())
+            facts["original"] = {k: src[k] for k in ("source", "width", "height", "fps", "seconds", "codec") if k in src}
     return facts
+
+
+STEP_BINS = ("<2 s", "2–5 s", "5–10 s", "10–15 s", ">15 s")
+
+
+def length_histogram(seconds: list[float]) -> dict[str, int]:
+    """How many steps fall in each of STEP_BINS (a step of exactly 15 s counts as 10–15 s)."""
+    counts = dict.fromkeys(STEP_BINS, 0)
+    for x in seconds:
+        counts[STEP_BINS[sum(x >= edge for edge in (2, 5, 10)) + (x > 15)]] += 1
+    return counts
 
 
 def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
@@ -218,7 +240,7 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
     tracks = {}
     for entry in entries:
         entry.setdefault("name", Path(entry.get("path", "?")).name)
-        tpath = Path(entry["track"]) if entry.get("track") else None
+        tpath = (cache / entry["track"]) if entry.get("track") else None  # a file name in the cache (older: absolute)
         tracks[entry["name"]] = HandTrack.load(tpath) if tpath and tpath.exists() else None
     frames = _load_frames(dataset)
 
@@ -240,7 +262,8 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
             "frames": len(checks["valid"]), "any_hand": any_hand, "left": hands[0], "right": hands[1],
             "task": e.get("task"), "steps": len(steps) if isinstance(steps, list) else 0,
             "captioned": bool(run.get("caption")) and e.get("task") != run.get("default_task"),
-            "flags": episode_flags(hands, any_hand),
+            "verified": e.get("verified"), "confidence": e.get("confidence"),
+            "flags": episode_flags(hands, any_hand, e.get("verified")),
         })
         if start_s is not None:
             ranges += [{"video": e["source"]["video"], **r} for r in problem_ranges(checks, fps, start_s)]
@@ -249,7 +272,7 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
     for entry in entries:
         name = entry["name"]
         track = tracks[name]
-        facts = _video_facts(entry, track)
+        facts = _video_facts(entry, track, dataset)
         if track is not None:
             score = track.score > 0
             cut = np.stack([border_cut(track.kp[:, s], track.width, track.height) for s in range(2)], 1) & score
@@ -257,8 +280,10 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
                          any_hand=_share(score.any(1)), both_hands=_share(score.all(1)),
                          left_cut=_share(cut[:, 0], score[:, 0]), right_cut=_share(cut[:, 1], score[:, 1]))
             exported = {(e["source"]["start_frame"], e["source"]["end_frame"]) for e in episodes if e["source"]["video"] == name}
-            idle = {(d["start"], d["end"]) for d in run.get("dropped", []) if d.get("video") == name}
-            segs = audit_segments(track, settings, exported, idle)
+            mine = [d for d in run.get("dropped", []) if d.get("video") == name]
+            idle = {(d["start"], d["end"]) for d in mine if d.get("reason", "caption said idle") == "caption said idle"}
+            unverified = {(d["start"], d["end"]) for d in mine if d.get("reason") == "caption not verified"}
+            segs = audit_segments(track, settings, exported, idle, entry.get("steps"), unverified)
             dropped += [{"video": name, **{k: d[k] for k in ("start_s", "end_s", "kind", "reason")}} for d in segs if not d["kept"]]
             ranges += [{"video": name, **r} for r in video_ranges(track, segs)]
         videos.append(facts)
@@ -274,9 +299,15 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
         overall["left"], overall["right"] = hand_summary(merged, 0), hand_summary(merged, 1)
     lengths = [e["seconds"] for e in report_eps]
     overall["episode_seconds"] = {"min": min(lengths), "median": round(float(np.median(lengths)), 2), "max": max(lengths)} if lengths else None
+    overall["step_seconds"] = length_histogram(lengths)
     overall["captions"] = {"enabled": bool(run.get("caption")), "captioned": sum(e["captioned"] for e in report_eps),
                            "with_steps": sum(e["steps"] > 0 for e in report_eps), "episodes": len(report_eps),
                            "idle_dropped": sum(d["kind"] == "caption said idle" for d in dropped)}
+    checked = [e["verified"] for e in report_eps if e["verified"] is not None]
+    overall["captions"]["verification"] = {
+        "checked": len(checked), "verified": sum(checked), "flagged": len(checked) - sum(checked),
+        "rate": round(sum(checked) / len(checked), 3) if checked else None,
+        "unverified_dropped": sum(d["kind"] == "caption not verified" for d in dropped)} if checked else None
     reasons: dict[str, int] = {}
     for d in dropped:
         reasons[d["kind"]] = reasons.get(d["kind"], 0) + 1
@@ -307,12 +338,23 @@ def _clock(s) -> str:
     return "–" if s is None else f"{int(s // 60)}:{s % 60:04.1f}"
 
 
+def _check(e: dict) -> str:
+    if e.get("verified") is None:
+        return "–"
+    return f"verified ({e['confidence']:g})" if e["verified"] else f"NOT VERIFIED ({e['confidence']:g})"
+
+
 def to_markdown(r: dict, max_rows: int = 15) -> str:
     o = r["overall"]
     L, R = o.get("left", {}), o.get("right", {})
     cap = o["captions"]
     captions = (f"{cap['captioned']}/{cap['episodes']} episodes, {cap['with_steps']} with sub-steps, "
                 f"{cap['idle_dropped']} dropped as idle") if cap["enabled"] else "off (default task text)"
+    ver = cap.get("verification")
+    check = (f"{ver['verified']}/{ver['checked']} verified ({_pct(ver['rate'])}); {ver['flagged']} flagged as not "
+             f"verified" + (f", {ver['unverified_dropped']} dropped" if ver.get("unverified_dropped") else "")
+             ) if ver else "not run (captions off, or made with --segment fixed)"
+    hist = ", ".join(f"{k}: {v}" for k, v in (o.get("step_seconds") or {}).items())
     drops = o["dropped_segments"]
     drop_text = str(drops["count"]) + (" (" + ", ".join(f"{k}: {v}" for k, v in drops["by_reason"].items()) + ")"
                                        if drops["count"] else "")
@@ -334,6 +376,8 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
              f"{_num(R.get('jitter_mm'), ' mm')} (depth {_num(R.get('jitter_depth_mm'), ' mm')}) |",
              f"| Wrist jumps > {JUMP_M * 100:g} cm | left {_pct(L.get('jumps'))}, right {_pct(R.get('jumps'))} |",
              f"| Captions | {captions} |",
+             f"| Caption check | {check} |",
+             f"| Step lengths | {hist or '–'} |",
              f"| Dropped segments | {drop_text} |",
              f"| Episodes with warnings | {o['flagged_episodes']} of {o['episodes']} |", ""]
     lines += ["## Source videos", "", "| Video | Original | Processed | Any hand | Left | Right | Cut L / R |", "|---|---|---|---|---|---|---|"]
@@ -343,14 +387,14 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
         p_txt = f"{v.get('width')}×{v.get('height')} {_num(v.get('fps'))} fps, {_num(v.get('seconds'))} s"
         lines.append(f"| {v['video']} | {o_txt} | {p_txt} | {_pct(v.get('any_hand'))} | {_pct(v.get('left_detected'))} | "
                      f"{_pct(v.get('right_detected'))} | {_pct(v.get('left_cut'))} / {_pct(v.get('right_cut'))} |")
-    lines += ["", "## Episodes", "", "| # | Start | s | Left | Right | Cut L / R | Jitter L / R | Task | Warnings |",
-              "|---|---|---|---|---|---|---|---|---|"]
+    lines += ["", "## Episodes", "", "| # | Start | s | Left | Right | Cut L / R | Jitter L / R | Task | Check | Warnings |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for e in r["episodes"]:
         lj = f"{_num(e['left']['jitter_px'])}/{_num(e['right']['jitter_px'])} px"
         task = (e["task"] or "").replace("|", "/")
         lines.append(f"| {e['episode_index']} | {_clock(e['start_s'])} | {e['seconds']:g} | {_pct(e['left']['detected'])} | "
                      f"{_pct(e['right']['detected'])} | {_pct(e['left']['cut_by_border'])} / {_pct(e['right']['cut_by_border'])} | "
-                     f"{lj} | {task} | {'; '.join(e['flags']) or 'none'} |")
+                     f"{lj} | {task} | {_check(e)} | {'; '.join(e['flags']) or 'none'} |")
     if r["dropped_segments"]:
         lines += ["", "## Dropped segments", "", "| Video | From | To | Reason |", "|---|---|---|---|"]
         lines += [f"| {d['video']} | {_clock(d['start_s'])} | {_clock(d['end_s'])} | {d['reason']} |" for d in r["dropped_segments"]]
@@ -372,6 +416,10 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
               "the distance estimate rather than in the image. It includes real motion, so compare deliveries "
               "rather than expect zero. "
               f"*Jumps* are frames where this exceeds {JUMP_M * 100:g} cm (often a depth jump or a left/right swap).",
+             "- *Caption check*: a second question to the model with other close-ups of the hands: does the instruction "
+             "name the object in the hands, and the action they do? Steps that fail, or whose instruction is not an "
+             "imperative naming the object, are marked NOT VERIFIED. A verified caption can still be wrong; the check "
+             "only catches some errors (the number in brackets is the share of checks passed).",
               "- *Unusable ranges*: time outside kept episodes (with the reason it was not kept), and stretches inside "
               "episodes where no hand is usable.", ""]
     return "\n".join(lines)

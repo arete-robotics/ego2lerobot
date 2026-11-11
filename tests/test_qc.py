@@ -5,8 +5,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ego2lerobot import HandTrack
-from ego2lerobot.qc import (DISCLAIMER, audit_segments, border_cut, frame_checks, hand_summary, runs, video_ranges,
-                            wrist_residual, write_report)
+from ego2lerobot.qc import (DISCLAIMER, audit_segments, border_cut, frame_checks, hand_summary, length_histogram, runs,
+                            video_ranges, wrist_residual, write_report)
 
 
 def track_from_presence(present: np.ndarray, fps: float = 10.0) -> HandTrack:
@@ -94,16 +94,15 @@ def test_frame_checks_shares():
     assert np.isclose(np.nanmax(z), 0.75) and np.nanargmax(z) in (19, 20)  # the step is all depth
 
 
-def test_write_report_end_to_end(tmp_path):
+def write_fixture(tmp_path, episodes_info: list[dict], run: dict):
+    """A one-video dataset with one 60-frame episode (synthetic_episode) and a 300-frame track in the cache."""
     dataset, cache = tmp_path / "ds", tmp_path / "ds_cache"
     (dataset / "meta").mkdir(parents=True)
     (dataset / "data" / "chunk-000").mkdir(parents=True)
     cache.mkdir()
     (dataset / "meta" / "info.json").write_text(json.dumps(
         {"fps": 15, "features": {"observation.images.ego": {"shape": [360, 640, 3]}}}))
-    (dataset / "meta" / "episodes_info.json").write_text(json.dumps([{
-        "episode_index": 0, "task": "wipe the table", "frames": 60, "steps": ["pick up cloth", "wipe"],
-        "source": {"video": "clip.mp4", "start_frame": 30, "end_frame": 150}}]))
+    (dataset / "meta" / "episodes_info.json").write_text(json.dumps(episodes_info))
     kp2d, kp3d, valid = synthetic_episode()
     table = pa.table({
         "episode_index": pa.array(np.zeros(60, np.int64)), "frame_index": pa.array(np.arange(60)),
@@ -116,16 +115,25 @@ def test_write_report_end_to_end(tmp_path):
     present[30:150] = True  # 30 fps source: the episode is 1–5 s, nothing else has hands
     track = track_from_presence(present, fps=30.0)
     track.save(cache / "clip.hands.npz")
-    (dataset / "meta" / "run.json").write_text(json.dumps({
+    (dataset / "meta" / "run.json").write_text(json.dumps(run))
+    return dataset, cache
+
+
+def test_write_report_end_to_end(tmp_path):
+    dataset, cache = write_fixture(tmp_path, [{
+        "episode_index": 0, "task": "wipe the table", "frames": 60, "steps": ["pick up cloth", "wipe"],
+        "source": {"video": "clip.mp4", "start_frame": 30, "end_frame": 150}}], {
         "settings": {"min_coverage": 0.7}, "caption": True, "default_task": "manipulate objects with the hands",
-        "videos": [{"name": "clip.mp4", "path": str(tmp_path / "clip.mp4"), "track": str(cache / "clip.hands.npz")}],
-        "dropped": []}))
+        "videos": [{"name": "clip.mp4", "path": str(tmp_path / "clip.mp4"),  # older run.json: absolute paths
+                    "track": str(tmp_path / "ds_cache" / "clip.hands.npz")}],
+        "dropped": []})
 
     report = write_report(dataset)
 
     o = report["overall"]
     assert o["episodes"] == 1 and o["frames"] == 60 and o["left"]["detected"] == 1.0 and o["right"]["detected"] == 0.5
-    assert o["captions"] == {"enabled": True, "captioned": 1, "with_steps": 1, "episodes": 1, "idle_dropped": 0}
+    assert o["captions"] == {"enabled": True, "captioned": 1, "with_steps": 1, "episodes": 1, "idle_dropped": 0,
+                             "verification": None}
     assert report["videos"][0]["seconds"] == 10.0 and report["videos"][0]["any_hand"] == 0.4
     assert report["episodes"][0]["start_s"] == 1.0
     assert any("R implausible distance" in f for f in report["episodes"][0]["flags"])
@@ -134,3 +142,31 @@ def test_write_report_end_to_end(tmp_path):
     assert DISCLAIMER in md and "wipe the table" in md
     assert "<table>" in (dataset / "qc_report.html").read_text()
     assert json.loads((dataset / "qc_report.json").read_text())["overall"]["episodes"] == 1
+
+
+def test_report_counts_verified_steps_and_step_lengths(tmp_path):
+    """Steps from `run --segment action`: verification rate, flagged steps, length histogram, drops from run.json."""
+    dataset, cache = write_fixture(tmp_path, [{
+        "episode_index": 0, "task": "fold the towel", "frames": 60, "verified": False, "confidence": 0.33,
+        "source": {"video": "clip.mp4", "start_frame": 30, "end_frame": 150}}], {
+        "settings": {"segment": "action", "min_seconds": 2.0, "min_coverage": 0.7}, "caption": True,
+        "default_task": "manipulate objects with the hands",
+        "videos": [{"name": "clip.mp4", "path": "clip.mp4", "track": "clip.hands.npz",
+                    "steps": [{"start": 30, "end": 150, "hand_coverage": 1.0}, {"start": 150, "end": 210, "hand_coverage": 0.9}]}],
+        "dropped": [{"video": "clip.mp4", "start": 150, "end": 210, "reason": "caption not verified"}]})
+
+    report = write_report(dataset, cache)
+
+    o = report["overall"]
+    assert o["captions"]["verification"] == {"checked": 1, "verified": 0, "flagged": 1, "rate": 0.0, "unverified_dropped": 1}
+    assert o["step_seconds"] == {"<2 s": 0, "2–5 s": 1, "5–10 s": 0, "10–15 s": 0, ">15 s": 0}
+    assert "caption not verified" in report["episodes"][0]["flags"]
+    assert {"video": "clip.mp4", "start_s": 5.0, "end_s": 7.0, "kind": "caption not verified",
+            "reason": "caption not verified"} in report["dropped_segments"]
+    md = (dataset / "qc_report.md").read_text()
+    assert "0/1 verified" in md and "NOT VERIFIED" in md and "2–5 s: 1" in md
+
+
+def test_length_histogram_edges():
+    assert length_histogram([1.9, 2.0, 4.99, 5.0, 14.9, 15.0, 15.1]) == {"<2 s": 1, "2–5 s": 2, "5–10 s": 1, "10–15 s": 2,
+                                                                         ">15 s": 1}

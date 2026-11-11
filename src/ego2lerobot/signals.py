@@ -1,0 +1,193 @@
+"""Hand signals that need no model and no video: per-hand grasp and release events, and candidate step boundaries.
+
+Grip aperture is the thumb-tip to index-tip distance divided by the palm length (wrist to middle-finger knuckle), both
+from MediaPipe's metric hand shape, so it does not change with distance to the camera. A hand counts as closed below
+CLOSE and open above OPEN (hysteresis); a state has to last MIN_STATE_S to count, and a hand lost for longer than
+MAX_GAP_S makes the state unknown, so no event is invented while the hand is out of view.
+"""
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from .hands import SIDES, HandTrack
+
+CLOSE, OPEN = 0.35, 0.6  # aperture thresholds (thumb–index distance / palm length)
+MIN_STATE_S = 0.3
+MAX_GAP_S = 0.3
+PAUSE = 0.1  # image widths per second: the wrists are nearly still below this
+TOGETHER, APART = 0.2, 0.3  # wrist-to-wrist distance in image widths (hysteresis)
+WEIGHTS = {"grasp": 1.0, "release": 1.0, "enters": 1.0, "leaves": 1.0, "pause": 0.5, "hands meet": 0.5,
+           "hands part": 0.5}
+
+
+def rolling_median(x: np.ndarray, window: int) -> np.ndarray:
+    """Median of the valid values in a centred window; NaN where x is NaN."""
+    half = max(0, window // 2)
+    padded = np.concatenate([np.full(half, np.nan), x, np.full(half, np.nan)])
+    view = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        out = np.nanmedian(view, axis=1)
+    return np.where(np.isnan(x), np.nan, out)
+
+
+def aperture(track: HandTrack) -> np.ndarray:
+    """(N, 2) grip aperture per hand, NaN where the hand was not found."""
+    w = track.world.astype(np.float64)
+    palm = np.linalg.norm(w[:, :, 9] - w[:, :, 0], axis=-1)
+    gap = np.linalg.norm(w[:, :, 4] - w[:, :, 8], axis=-1)
+    ok = (track.score > 0) & (palm > 1e-6)
+    return np.where(ok, gap / np.where(ok, palm, 1.0), np.nan)
+
+
+def runs_of(values: np.ndarray) -> list[tuple[int, int, int]]:
+    """(start, end, value) for each run of equal values."""
+    edges = np.flatnonzero(np.diff(values)) + 1
+    starts = np.concatenate([[0], edges])
+    ends = np.concatenate([edges, [len(values)]])
+    return [(int(s), int(e), int(values[s])) for s, e in zip(starts, ends)]
+
+
+def grip_states(a: np.ndarray, fps: float, close: float = CLOSE, open_: float = OPEN, min_state_s: float = MIN_STATE_S,
+                max_gap_s: float = MAX_GAP_S) -> np.ndarray:
+    """(N,) 1 closed, 0 open, -1 unknown, from one hand's aperture."""
+    a = rolling_median(a, max(1, round(0.2 * fps)) | 1)
+    state = np.full(len(a), -1, np.int8)
+    current, last_seen = -1, -np.inf
+    for i, x in enumerate(a):
+        if np.isnan(x):
+            if i - last_seen > max_gap_s * fps:
+                current = -1
+        else:
+            last_seen = i
+            current = 1 if x < close else 0 if x > open_ else current
+        state[i] = current
+    shortest = max(1, round(min_state_s * fps))
+    previous = -1
+    for s, e, v in runs_of(state):  # a closed or open spell shorter than min_state_s keeps the state before it
+        if v >= 0 and e - s < shortest:
+            state[s:e] = previous
+        else:
+            previous = v
+    return state
+
+
+def grasp_events(track: HandTrack, **kw) -> dict[str, list[dict]]:
+    """Per hand, the frames where it closes (grasp) and opens (release); {"left": [...], "right": [...]}.
+
+    Events are only emitted between two known states, never across a stretch where the hand was out of view."""
+    a = aperture(track)
+    out = {}
+    for s, side in enumerate(SIDES):
+        state = grip_states(a[:, s], track.fps, **kw)
+        events, known = [], -1
+        for start, _, v in runs_of(state):
+            if v < 0:
+                known = -1
+                continue
+            if known >= 0 and v != known:
+                events.append({"frame": start, "t": round(start / track.fps, 3), "event": "grasp" if v == 1 else "release"})
+            known = v
+        out[side] = events
+    return out
+
+
+def wrist_speed(track: HandTrack, smooth_s: float = 0.3) -> np.ndarray:
+    """(N,) the faster wrist's image speed in frame widths per second (median-smoothed); NaN with no hand."""
+    kp = track.kp[:, :, 0].astype(np.float64)
+    ok = track.score > 0
+    v = np.full(ok.shape, np.nan)
+    v[1:] = np.linalg.norm(kp[1:] - kp[:-1], axis=-1) / track.width * track.fps
+    v[1:][~(ok[1:] & ok[:-1])] = np.nan
+    v[0] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        speed = np.nanmax(v, axis=1)
+    return rolling_median(speed, max(1, round(smooth_s * track.fps)) | 1)
+
+
+def presence_cues(track: HandTrack, min_s: float = 0.5, gap_s: float = MAX_GAP_S) -> list[tuple[int, str]]:
+    """A hand entering or leaving the view (stays of at least min_s, gaps under gap_s bridged)."""
+    cues = []
+    for s, side in enumerate(SIDES):
+        seen = track.score[:, s] > 0
+        for a, b, v in runs_of(seen.astype(np.int8)):  # bridge short gaps
+            if not v and b - a < gap_s * track.fps and a > 0 and b < len(seen):
+                seen[a:b] = True
+        for a, b, v in runs_of(seen.astype(np.int8)):
+            if v and b - a >= min_s * track.fps:
+                if a > 0:
+                    cues.append((a, f"{side} enters"))
+                if b < len(seen):
+                    cues.append((b, f"{side} leaves"))
+    return cues
+
+
+def pause_cues(speed: np.ndarray, fps: float, threshold: float = PAUSE) -> list[tuple[int, str]]:
+    """Local minima of wrist speed below `threshold`, at least a second apart."""
+    cues, half = [], max(1, round(0.5 * fps))
+    for i in np.flatnonzero(speed < threshold):
+        window = speed[max(0, i - half): i + half + 1]
+        if speed[i] <= np.nanmin(window) and (not cues or i - cues[-1][0] >= 2 * half):
+            cues.append((int(i), "pause"))
+    return cues
+
+
+def together_cues(track: HandTrack, together: float = TOGETHER, apart: float = APART) -> list[tuple[int, str]]:
+    """Both hands in view and their wrists coming together or moving apart (hysteresis)."""
+    both = (track.score > 0).all(1)
+    d = np.linalg.norm(track.kp[:, 0, 0] - track.kp[:, 1, 0], axis=-1) / track.width
+    d = rolling_median(np.where(both, d, np.nan), max(1, round(0.2 * track.fps)) | 1)
+    cues, state = [], None
+    for i, x in enumerate(d):
+        if np.isnan(x):
+            continue
+        new = "together" if x < together else "apart" if x > apart else state
+        if state is not None and new != state:
+            cues.append((i, "hands meet" if new == "together" else "hands part"))
+        state = new
+    return cues
+
+
+def cue_weight(name: str) -> float:
+    """"left grasp" → WEIGHTS["grasp"], "hands meet" → WEIGHTS["hands meet"]."""
+    return WEIGHTS.get(name, WEIGHTS.get(name.split(" ", 1)[-1], 0.5))
+
+
+@dataclass
+class Candidate:
+    frame: int
+    score: float
+    cues: list[str] = field(default_factory=list)
+
+    def to_dict(self, fps: float) -> dict:
+        return {"frame": self.frame, "t": round(self.frame / fps, 2), "score": round(self.score, 2), "cues": self.cues}
+
+
+def candidates(track: HandTrack, events: dict | None = None, window_s: float = 0.5, min_gap_s: float = 1.5,
+               min_score: float = 1.0) -> list[Candidate]:
+    """Candidate step boundaries: grasp/release, a hand entering or leaving, a pause, hands meeting or parting.
+
+    Cues within `window_s` are pooled into one candidate scored by the sum of their weights (each cue counted once);
+    then the best candidates at least `min_gap_s` apart and scoring at least `min_score` are kept, in time order."""
+    events = grasp_events(track) if events is None else events
+    cues = [(e["frame"], f"{side} {e['event']}") for side in SIDES for e in events.get(side, [])]
+    cues += presence_cues(track) + pause_cues(wrist_speed(track), track.fps) + together_cues(track)
+    cues.sort()
+    pooled: list[Candidate] = []
+    group: list[tuple[int, str]] = []
+    for cue in cues + [(10**12, "")]:
+        if group and cue[0] - group[0][0] > window_s * track.fps:
+            names = sorted({name for _, name in group})
+            best = max(group, key=lambda c: cue_weight(c[1]))
+            pooled.append(Candidate(best[0], sum(cue_weight(n) for n in names), names))
+            group = []
+        group.append(cue)
+    kept: list[Candidate] = []
+    for c in sorted(pooled, key=lambda c: -c.score):
+        if c.score >= min_score and all(abs(c.frame - k.frame) >= min_gap_s * track.fps for k in kept):
+            kept.append(c)
+    return sorted(kept, key=lambda c: c.frame)
