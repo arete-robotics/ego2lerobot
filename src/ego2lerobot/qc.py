@@ -70,13 +70,14 @@ def frame_checks(kp2d: np.ndarray, kp3d: np.ndarray, valid: np.ndarray, width: i
     far = ((dist < DIST_RANGE[0]) | (dist > DIST_RANGE[1])) & valid
     px = np.stack([wrist_residual(kp2d[:, s, 0, :2], valid[:, s]) for s in range(2)], 1)
     m = np.stack([wrist_residual(kp3d[:, s, 0], valid[:, s]) for s in range(2)], 1)
-    return {"valid": valid, "cut": cut, "far": far, "jitter_px": px, "jitter_m": m}
+    z = np.stack([wrist_residual(kp3d[:, s, 0, 2:], valid[:, s]) for s in range(2)], 1)
+    return {"valid": valid, "cut": cut, "far": far, "jitter_px": px, "jitter_m": m, "jitter_z": z}
 
 
 def hand_summary(c: dict, s: int) -> dict:
     """Shares and jitter for hand s (0 left, 1 right) from `frame_checks` output."""
     v = c["valid"][:, s]
-    px, m = c["jitter_px"][:, s], c["jitter_m"][:, s]
+    px, m, z = c["jitter_px"][:, s], c["jitter_m"][:, s], c["jitter_z"][:, s]
     has = ~np.isnan(m)
     return {
         "detected": _share(v),
@@ -84,6 +85,7 @@ def hand_summary(c: dict, s: int) -> dict:
         "distance_implausible": _share(c["far"][:, s], v),
         "jitter_px": round(float(np.nanmedian(px)), 2) if has.any() else None,
         "jitter_mm": round(float(np.nanmedian(m)) * 1000, 1) if has.any() else None,
+        "jitter_depth_mm": round(float(np.nanmedian(z)) * 1000, 1) if has.any() else None,
         "jumps": _share(m[has] > JUMP_M) if has.any() else None,
     }
 
@@ -327,8 +329,9 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
              f"| Hand cut by image border | left {_pct(L.get('cut_by_border'))}, right {_pct(R.get('cut_by_border'))} |",
              f"| Wrist distance outside {DIST_RANGE[0]}–{DIST_RANGE[1]} m | left {_pct(L.get('distance_implausible'))}, "
              f"right {_pct(R.get('distance_implausible'))} |",
-             f"| Wrist jitter (median) | left {_num(L.get('jitter_px'), ' px')} / {_num(L.get('jitter_mm'), ' mm')}, "
-             f"right {_num(R.get('jitter_px'), ' px')} / {_num(R.get('jitter_mm'), ' mm')} |",
+             f"| Wrist jitter (median) | left {_num(L.get('jitter_px'), ' px')} / {_num(L.get('jitter_mm'), ' mm')} "
+             f"(depth {_num(L.get('jitter_depth_mm'), ' mm')}), right {_num(R.get('jitter_px'), ' px')} / "
+             f"{_num(R.get('jitter_mm'), ' mm')} (depth {_num(R.get('jitter_depth_mm'), ' mm')}) |",
              f"| Wrist jumps > {JUMP_M * 100:g} cm | left {_pct(L.get('jumps'))}, right {_pct(R.get('jumps'))} |",
              f"| Captions | {captions} |",
              f"| Dropped segments | {drop_text} |",
@@ -365,7 +368,9 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
               "- *Wrist distance*: from the average hand size, not a depth sensor; few-centimetre errors are normal.",
               "- *Jitter*: median distance of the wrist from the midpoint of its neighbouring frames (half the "
               f"frame-to-frame acceleration), in pixels of the delivered {o['image']} image and in millimetres in 3D. "
-              "It includes real motion, so compare deliveries rather than expect zero. "
+              "*Depth* is the part along the viewing axis; when it makes up most of the 3D figure, the noise is in "
+              "the distance estimate rather than in the image. It includes real motion, so compare deliveries "
+              "rather than expect zero. "
               f"*Jumps* are frames where this exceeds {JUMP_M * 100:g} cm (often a depth jump or a left/right swap).",
               "- *Unusable ranges*: time outside kept episodes (with the reason it was not kept), and stretches inside "
               "episodes where no hand is usable.", ""]

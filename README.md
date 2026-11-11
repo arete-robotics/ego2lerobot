@@ -22,7 +22,20 @@ ego2lerobot run videos/*.mp4 --out my_dataset --intrinsics intrinsics.json --cap
 
 # Uncalibrated video: give the horizontal field of view instead
 ego2lerobot run clip.mp4 --out my_dataset --hfov 90 --default-task "fold the towel"
+
+# Ultra-wide action camera at 4K/60 fps: make 1080p/30 fps proxies first, then use the nominal fisheye preset
+ego2lerobot prepare raw/*.MP4 --out proxy/
+ego2lerobot run proxy/*.mp4 --out my_dataset --camera action-ultrawide --preview previews/
 ```
+`--camera action-ultrawide` is a nominal lens (equidistant fisheye, 124° horizontal, from a 155° spec-sheet FOV), not a
+calibration; a checkerboard calibration passed as `--intrinsics` is always better. `--rectify` runs hand detection on a
+rectilinear view of a fisheye frame and maps the keypoints back; it is off by default because on calibrated
+Egocentric-10K fisheye clips it found fewer hands than the raw frame. How to film: [docs/capture_advice.md](docs/capture_advice.md).
+
+Every run also writes **`qc_report.md`** (plus `.json` and `.html`) into the dataset: detection rate per hand, hands
+cut by the image border, wrist jitter and implausible distances, episode lengths, dropped segments with reasons,
+caption coverage and unusable time ranges. These are automatic checks without ground truth.
+`ego2lerobot qc my_dataset` rebuilds it.
 Then load the result:
 ```python
 from lerobot.datasets.lerobot_dataset import LeRobotDataset

@@ -85,11 +85,13 @@ def test_frame_checks_shares():
     c = frame_checks(kp2d, kp3d, valid, 640, 360)
     left, right = hand_summary(c, 0), hand_summary(c, 1)
     assert left == {"detected": 1.0, "cut_by_border": 0.0, "distance_implausible": 0.0, "jitter_px": 0.0,
-                    "jitter_mm": 0.0, "jumps": 0.0}
+                    "jitter_mm": 0.0, "jitter_depth_mm": 0.0, "jumps": 0.0}
     assert right["detected"] == 0.5
     assert np.isclose(right["cut_by_border"], 10 / 30, atol=1e-3)
     assert np.isclose(right["distance_implausible"], 10 / 30, atol=1e-3)
     assert right["jumps"] > 0  # the 0.5 m → 2 m step
+    z = c["jitter_z"][:, 1]
+    assert np.isclose(np.nanmax(z), 0.75) and np.nanargmax(z) in (19, 20)  # the step is all depth
 
 
 def test_write_report_end_to_end(tmp_path):
