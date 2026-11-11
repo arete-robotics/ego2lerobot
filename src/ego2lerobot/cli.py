@@ -18,6 +18,7 @@ from .camera import Camera
 from .export import Episode, write_dataset
 from .hands import HandTrack, detect
 from .segments import find_segments, spread
+from . import stereo_cli
 
 
 def video_size(video: Path) -> tuple[int, int]:
@@ -126,6 +127,7 @@ def main(argv=None) -> None:
     d = sub.add_parser("detect", help="hand detections for one video")
     d.add_argument("video", type=Path)
     d.add_argument("out", type=Path)
+    stereo_cli.add_parser(sub)
 
     p = sub.add_parser("prepare", help="downscaled, frame-rate-reduced proxies of large videos (e.g. 4K at 60 fps)")
     p.add_argument("videos", nargs="+", type=Path)
@@ -138,6 +140,8 @@ def main(argv=None) -> None:
     q.add_argument("--cache", type=Path, help="hand detections (default: DATASET_cache)")
 
     args = ap.parse_args(argv)
+    if args.cmd == "stereo":
+        return stereo_cli.run(args)
     if args.cmd == "run":
         run(args)
     elif args.cmd == "prepare":

@@ -17,6 +17,7 @@ dependencies = ["lerobot[dataset]>=0.4", "mediapipe>=0.10", "av", "numpy", "pill
 caption = ["mlx-vlm>=0.3"]
 caption-cuda = ["transformers>=4.57", "accelerate"]  # Qwen3-VL on Linux/NVIDIA; or use --caption-url with a vLLM server
 test = ["pytest"]
+rtmpose = ["rtmlib>=0.0.13", "onnxruntime>=1.16"]  # optional second hand model for `ego2lerobot stereo --rtmpose`
 
 [project.scripts]
 ego2lerobot = "ego2lerobot.cli:main"
