@@ -24,6 +24,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from .camera import Camera
 from .hands import BONES, HandTrack
+from .signals import Motion, measured_motion
 
 NEEDED = (0, 4, 5, 8, 17)  # wrist, thumb tip, index knuckle, index tip, little knuckle: palm frame and pinch
 REASONS = {-1: "no hand", 0: "triangulated", 1: "one view only", 2: "epipolar", 3: "depth", 4: "hand size", 5: "few joints"}
@@ -120,8 +121,10 @@ class StereoRig:
     """A calibrated horizontal stereo pair. Rectification follows Bouguet (as OpenCV's stereoRectify): each camera turns
     by half the relative rotation, then both turn so the baseline lies along x and epipolar lines become rows."""
 
-    def __init__(self, width: int, height: int, left: Lens, right: Lens, R=np.eye(3), T=(-0.06, 0.0, 0.0)):
+    def __init__(self, width: int, height: int, left: Lens, right: Lens, R=np.eye(3), T=(-0.06, 0.0, 0.0),
+                 calibrated_size: tuple[int, int] | None = None):
         self.width, self.height, self.left, self.right = int(width), int(height), left, right
+        self.calibrated_size = tuple(int(v) for v in calibrated_size) if calibrated_size else None  # the file's size
         self.R = np.asarray(R, float).reshape(3, 3)
         self.T = np.asarray(T, float).reshape(3)
         if not (self.T[0] < 0 and abs(self.T[0]) > abs(self.T[1])):
@@ -142,24 +145,33 @@ class StereoRig:
         model = d.get("model", "pinhole")
         if model not in ("pinhole", "fisheye"):
             raise ValueError(f"unsupported camera model {model!r}; use pinhole or fisheye")
+        size = (d["image_width"], d["image_height"])
         if "baseline" in d:
             lens = Lens.from_dict(d, model)
-            rig = cls(d["image_width"], d["image_height"], lens, lens, np.eye(3), (-float(d["baseline"]), 0.0, 0.0))
+            rig = cls(*size, lens, lens, np.eye(3), (-float(d["baseline"]), 0.0, 0.0), size)
         else:
-            rig = cls(d["image_width"], d["image_height"], Lens.from_dict(d["left"], model),
-                      Lens.from_dict(d["right"], model), d["R"], d["T"])
+            rig = cls(*size, Lens.from_dict(d["left"], model), Lens.from_dict(d["right"], model), d["R"], d["T"], size)
         return rig.scaled(width, height) if width and height else rig
 
     def scaled(self, width: int, height: int) -> StereoRig:
         if (width, height) == (self.width, self.height):
             return self
         sx, sy = width / self.width, height / self.height
-        return StereoRig(width, height, self.left.scaled(sx, sy), self.right.scaled(sx, sy), self.R, self.T)
+        return StereoRig(width, height, self.left.scaled(sx, sy), self.right.scaled(sx, sy), self.R, self.T,
+                         self.calibrated_size)
+
+    def rectified_input(self) -> bool:
+        """True if the two views are already rectified: same undistorted lens, no rotation, baseline along x."""
+        return bool(self.left == self.right and not any(self.left.distortion) and np.allclose(self.R, np.eye(3))
+                    and np.allclose(self.T[1:], 0.0))
 
     def to_dict(self) -> dict:
         return {"image_width": self.width, "image_height": self.height, "model": self.left.model,
                 "left": self.left.to_dict(), "right": self.right.to_dict(), "R": self.R.tolist(), "T": self.T.tolist(),
-                "baseline_m": self.baseline, "rectify_left": self.R1.tolist(), "rectify_right": self.R2.tolist()}
+                "baseline_m": self.baseline, "rectify_left": self.R1.tolist(), "rectify_right": self.R2.tolist(),
+                "rotation_deg": float(np.degrees(np.linalg.norm(_rotvec(self.R)))),
+                "rectified_input": self.rectified_input(),
+                "calibrated_size": list(self.calibrated_size) if self.calibrated_size else None}
 
     def project(self, X: np.ndarray, view: int = 0) -> np.ndarray:
         """Points (n, 3) in the left camera frame → pixels in the left (0) or right (1) original image."""
@@ -344,6 +356,47 @@ class StereoLabels:
         n = len(self.valid)
         return HandTrack(np.zeros((n, 2, 21, 2), np.float32), np.zeros((n, 2, 21, 3), np.float32),
                          self.valid.astype(np.float32), self.fps, self.width, self.height)
+
+    def seen(self) -> np.ndarray:
+        """(N, view, hand) True where the hand was detected in that view."""
+        return self.kp2d[..., 2].max(-1) > 0
+
+    def step_track(self, rig: StereoRig | None = None) -> MeasuredTrack:
+        """A track for the monocular step and grasp code (signals, segments.find_steps) that uses the measurements.
+
+        score: 1 where the hand is in view (detected in either camera, or labelled in 3D), so a stretch where
+               triangulation failed is not a hand leaving or entering the view;
+        world: the triangulated joints (metres, left camera frame; NaN where unknown), so the grip aperture
+               (thumb–index tip over wrist–middle knuckle) is measured, and unknown where triangulation failed;
+        motion: the measured 3D wrists (signals.measured_motion) for pauses and hands meeting or parting;
+        kp:    left-view pixels (for the captioner's close-ups): the left detection, else the 3D hand projected into
+               the left view when `rig` is given, else the right detection (off by the disparity)."""
+        seen = self.seen()
+        present = seen.any(1) | self.valid
+        kp = self.kp2d[:, 0, :, :, :2].copy()
+        right_only = present & ~seen[:, 0]
+        kp[right_only] = self.kp2d[:, 1, :, :, :2][right_only]
+        if rig is not None:
+            for i, s in zip(*np.nonzero(self.valid & ~seen[:, 0])):
+                known = np.isfinite(self.kp3d[i, s, :, 0])
+                pts = rig.project(self.kp3d[i, s][known], 0)
+                kp[i, s] = pts.mean(0)
+                kp[i, s][known] = pts
+        return MeasuredTrack(kp.astype(np.float32), self.kp3d.copy(), present.astype(np.float32), self.fps, self.width,
+                             self.height, measured_motion(self.kp3d[:, :, 0], self.valid))
+
+    def coverage(self, start: int, end: int) -> tuple[float, float]:
+        """Share of frames in [start, end) with at least one, and with both, hands labelled in 3D."""
+        v = self.valid[start:end]
+        return (round(float(v.any(1).mean()), 3), round(float(v.all(1).mean()), 3)) if len(v) else (0.0, 0.0)
+
+
+@dataclass
+class MeasuredTrack(HandTrack):
+    """A HandTrack whose wrist motion (and, through `world`, grip) comes from measured 3D; see StereoLabels.step_track.
+    signals.wrist_motion picks up `motion`."""
+
+    motion: Motion | None = None
 
 
 def label_stereo(rig: StereoRig, views, fps: float, checks: Checks | None = None) -> StereoLabels:
