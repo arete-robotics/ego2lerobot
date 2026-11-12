@@ -19,8 +19,47 @@ MIN_STATE_S = 0.3
 MAX_GAP_S = 0.3
 PAUSE = 0.1  # image widths per second: the wrists are nearly still below this
 TOGETHER, APART = 0.2, 0.3  # wrist-to-wrist distance in image widths (hysteresis)
+# The same cues from measured 3D wrists (stereo), in metres. One image width is about 1 m at half a metre from a
+# 90–100° lens, so the numbers stay the same.
+PAUSE_M = 0.1  # m/s
+TOGETHER_M, APART_M = 0.2, 0.3  # m
 WEIGHTS = {"grasp": 1.0, "release": 1.0, "enters": 1.0, "leaves": 1.0, "pause": 0.5, "hands meet": 0.5,
            "hands part": 0.5}
+
+
+@dataclass(frozen=True)
+class Motion:
+    """The wrist positions behind the motion cues (wrist_speed, pause_cues, together_cues) and their thresholds.
+
+    By default (image_motion) these are the wrists in the image, in frame widths. A track can carry its own Motion in
+    a `motion` attribute, for example the measured 3D wrists of a stereo clip in metres
+    (stereo.StereoLabels.step_track); frames where `valid` is False are gaps, never motion."""
+
+    wrist: np.ndarray  # (N, 2, D) positions
+    valid: np.ndarray  # (N, 2) True where the position is known
+    scale: float  # positions / scale are in `unit`
+    unit: str
+    pause: float  # unit per second
+    together: float  # unit
+    apart: float  # unit
+    max_gap_s: float | None = None  # hands meeting or parting: no cue across a gap longer than this (None: any gap)
+
+
+def image_motion(track: HandTrack) -> Motion:
+    """Wrists in the image, in frame widths (the monocular path)."""
+    return Motion(track.kp[:, :, 0], track.score > 0, track.width, "frame widths", PAUSE, TOGETHER, APART)
+
+
+def measured_motion(wrist: np.ndarray, valid: np.ndarray) -> Motion:
+    """Measured 3D wrists (N, 2, 3) in metres, NaN or `valid` False where unknown."""
+    valid = np.asarray(valid, bool) & np.isfinite(wrist).all(-1)
+    return Motion(np.asarray(wrist, np.float64), valid, 1.0, "m", PAUSE_M, TOGETHER_M, APART_M, MAX_GAP_S)
+
+
+def wrist_motion(track) -> Motion:
+    """The track's own Motion if it carries one, else its image wrists."""
+    own = getattr(track, "motion", None)
+    return own if own is not None else image_motion(track)
 
 
 def rolling_median(x: np.ndarray, window: int) -> np.ndarray:
@@ -96,11 +135,13 @@ def grasp_events(track: HandTrack, **kw) -> dict[str, list[dict]]:
 
 
 def wrist_speed(track: HandTrack, smooth_s: float = 0.3) -> np.ndarray:
-    """(N,) the faster wrist's image speed in frame widths per second (median-smoothed); NaN with no hand."""
-    kp = track.kp[:, :, 0].astype(np.float64)
-    ok = track.score > 0
+    """(N,) the faster wrist's speed (median-smoothed); NaN with no hand. In frame widths per second for image
+    wrists, in m/s for a track with measured 3D wrists (see Motion)."""
+    m = wrist_motion(track)
+    kp = m.wrist.astype(np.float64)
+    ok = m.valid
     v = np.full(ok.shape, np.nan)
-    v[1:] = np.linalg.norm(kp[1:] - kp[:-1], axis=-1) / track.width * track.fps
+    v[1:] = np.linalg.norm(kp[1:] - kp[:-1], axis=-1) / m.scale * track.fps
     v[1:][~(ok[1:] & ok[:-1])] = np.nan
     v[0] = np.nan
     with warnings.catch_warnings():
@@ -136,15 +177,22 @@ def pause_cues(speed: np.ndarray, fps: float, threshold: float = PAUSE) -> list[
     return cues
 
 
-def together_cues(track: HandTrack, together: float = TOGETHER, apart: float = APART) -> list[tuple[int, str]]:
-    """Both hands in view and their wrists coming together or moving apart (hysteresis)."""
-    both = (track.score > 0).all(1)
-    d = np.linalg.norm(track.kp[:, 0, 0] - track.kp[:, 1, 0], axis=-1) / track.width
+def together_cues(track: HandTrack, together: float | None = None, apart: float | None = None) -> list[tuple[int, str]]:
+    """Both hands in view and their wrists coming together or moving apart (hysteresis). Thresholds default to the
+    track's Motion (TOGETHER and APART image widths, or TOGETHER_M and APART_M metres for measured 3D wrists)."""
+    m = wrist_motion(track)
+    together = m.together if together is None else together
+    apart = m.apart if apart is None else apart
+    both = m.valid.all(1)
+    d = np.linalg.norm(m.wrist[:, 0] - m.wrist[:, 1], axis=-1) / m.scale
     d = rolling_median(np.where(both, d, np.nan), max(1, round(0.2 * track.fps)) | 1)
-    cues, state = [], None
+    cues, state, last = [], None, -np.inf
     for i, x in enumerate(d):
         if np.isnan(x):
+            if m.max_gap_s is not None and i - last > m.max_gap_s * track.fps:
+                state = None  # what happened during a long gap is unknown
             continue
+        last = i
         new = "together" if x < together else "apart" if x > apart else state
         if state is not None and new != state:
             cues.append((i, "hands meet" if new == "together" else "hands part"))
@@ -172,10 +220,12 @@ def candidates(track: HandTrack, events: dict | None = None, window_s: float = 0
     """Candidate step boundaries: grasp/release, a hand entering or leaving, a pause, hands meeting or parting.
 
     Cues within `window_s` are pooled into one candidate scored by the sum of their weights (each cue counted once);
-    then the best candidates at least `min_gap_s` apart and scoring at least `min_score` are kept, in time order."""
+    then the best candidates at least `min_gap_s` apart and scoring at least `min_score` are kept, in time order.
+    Pauses and hands meeting or parting come from the track's Motion (image wrists, or measured 3D wrists)."""
     events = grasp_events(track) if events is None else events
     cues = [(e["frame"], f"{side} {e['event']}") for side in SIDES for e in events.get(side, [])]
-    cues += presence_cues(track) + pause_cues(wrist_speed(track), track.fps) + together_cues(track)
+    pauses = pause_cues(wrist_speed(track), track.fps, wrist_motion(track).pause)
+    cues += presence_cues(track) + pauses + together_cues(track)
     cues.sort()
     pooled: list[Candidate] = []
     group: list[tuple[int, str]] = []
