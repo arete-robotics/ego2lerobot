@@ -261,7 +261,8 @@ def test_run_with_captions_stores_verification_and_reports_it(tmp_path, clip, mo
     monkeypatch.setattr(caption, "make_backend", lambda *a, **k: ScriptedBackend(*[FOLD, FOLD2] * 10))
     video, cache = clip
     out = tmp_path / "work" / "ds"
-    main(["run", str(video), "--out", str(out), "--cache", str(cache), "--hfov", "90", "--width", "64", "--caption"])
+    main(["run", str(video), "--out", str(out), "--cache", str(cache), "--hfov", "90", "--width", "64", "--caption",
+          "--merge-agreeing"])
     info = json.loads((out / "meta" / "episodes_info.json").read_text())
     assert [e["task"] for e in info] == ["fold the towel"] and info[0]["verified"] is True
     assert info[0]["check"]["second_instruction"] == "crease the towel in half"

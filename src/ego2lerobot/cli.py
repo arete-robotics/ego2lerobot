@@ -72,8 +72,9 @@ def events_between(events: dict, start: int, end: int, fps: float) -> list[dict]
 def action_steps(video: Path, track: HandTrack, events: dict, captioner, args, min_seconds: float, entry: dict):
     """--segment action: steps that follow the work, each with its first caption (None without --caption).
 
-    Cuts come from find_steps (checked by the captioner). Steps with too little hand in view are dropped; touching
-    neighbours whose first captions agree (same kind of action on the same object) are merged and captioned again.
+    Cuts come from find_steps (checked by the captioner). Steps with too little hand in view are dropped. With
+    --merge-agreeing, touching neighbours whose first captions agree (same kind of action on the same object) are
+    merged and captioned again.
     Adds the candidate cuts ("boundaries") and every step found ("steps") to `entry` for meta/run.json."""
     judge = None
     if captioner:
@@ -89,9 +90,11 @@ def action_steps(video: Path, track: HandTrack, events: dict, captioner, args, m
     if captioner:
         from .caption import captions_agree
         firsts = [captioner.caption(video, track, s.start, s.end) for s in steps]
-        steps, firsts, merged = merge_agreeing(steps, firsts, captions_agree, track, args.max_seconds)
-        firsts = [captioner.caption(video, track, s.start, s.end) if m else f for s, f, m in zip(steps, firsts, merged)]
-        print(f"{video.name}: {sum(merged)} steps merged from neighbours with agreeing captions", flush=True)
+        if args.merge_agreeing:
+            steps, firsts, merged = merge_agreeing(steps, firsts, captions_agree, track, args.max_seconds)
+            firsts = [captioner.caption(video, track, s.start, s.end) if m else f
+                      for s, f, m in zip(steps, firsts, merged)]
+            print(f"{video.name}: {sum(merged)} steps merged from neighbours with agreeing captions", flush=True)
     entry["steps"] = [{"start": s.start, "end": s.end, "hand_coverage": s.hand_coverage, "cuts": s.cuts}
                       for s in sorted(low + steps, key=lambda s: s.start)]
     return list(zip(steps, firsts))
@@ -162,7 +165,7 @@ def run(args) -> None:
     from .qc import write_report, write_run_log
     settings = {"segment": args.segment, "min_seconds": min_seconds, "max_seconds": args.max_seconds, "gap_seconds": 1.0,
                 "min_coverage": args.min_coverage, "per_video": args.per_video, "step": args.step, "width": args.width,
-                "rectify": args.rectify, "drop_unverified": args.drop_unverified}
+                "rectify": args.rectify, "drop_unverified": args.drop_unverified, "merge_agreeing": args.merge_agreeing}
     write_run_log(args.out, settings, videos, dropped, bool(args.caption), args.default_task)
     report = write_report(args.out, cache)
     print(f"QC report: {args.out / 'qc_report.md'} ({report['overall']['flagged_episodes']} episodes with warnings)")
@@ -207,6 +210,9 @@ def main(argv=None) -> None:
                         "datasets made before sub-steps")
     r.add_argument("--min-seconds", type=float, help="shortest step (default 2 s with --segment action, 3 s with fixed)")
     r.add_argument("--max-seconds", type=float, default=15.0, help="longest step; longer ones are split")
+    r.add_argument("--merge-agreeing", action="store_true",
+                   help="merge touching steps whose captions agree (fewer, longer steps; on the evaluation clips this "
+                        "cost recall and caption accuracy, so it is off by default)")
     r.add_argument("--drop-unverified", action="store_true",
                    help="leave out steps whose caption fails verification (default: keep them, marked verified: false)")
     r.add_argument("--min-coverage", type=float, default=0.7, help="share of frames that must show a hand")
