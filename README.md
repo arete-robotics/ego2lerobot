@@ -37,6 +37,16 @@ cut by the image border, wrist jitter and implausible distances, step lengths, d
 caption coverage, the share of captions that passed verification, and unusable time ranges. These are automatic
 checks without ground truth.
 
+**Step types.** A workstation repeats a few kinds of step. With `--step-vocab` the model picks one of them for each
+step instead of writing a free caption:
+```bash
+# a text file with one imperative step type per line ('#' starts a comment)
+ego2lerobot run clip.mp4 --out my_dataset --caption --step-vocab station_steps.txt
+# or build the list from the video; edit my_dataset_step_vocab.txt and re-run with --step-vocab my_dataset_step_vocab.txt
+ego2lerobot run clip.mp4 --out my_dataset --caption --step-vocab auto
+```
+See *How it works*, step 7.
+
 `--segment fixed` reproduces datasets made before sub-steps (version 0.1): stretches with hands in view split into
 equal parts of at most `--max-seconds`, 3 s minimum, and the earlier one-question captions.
 `ego2lerobot qc my_dataset` rebuilds it.
@@ -60,7 +70,8 @@ ds = LeRobotDataset("local/ego2lerobot", root="my_dataset")
 
 `meta/episodes_info.json` holds, per episode: source video and frames, how its start and end were chosen (`cuts`), the
 object, touched objects, `verified` and `confidence` of the instruction with the second caption (`check`), grasp and
-release events (seconds from the episode start) and hand coverage. `meta/grasp_events.json` has the grasp/release
+release events (seconds from the episode start) and hand coverage; with `--step-vocab` also `step_type`, the 1-based
+number of the episode's type in `meta/step_vocab.json` (0: no type agreed, free caption). `meta/grasp_events.json` has the grasp/release
 timeline of each hand over the whole video; `meta/run.json` the settings, every candidate boundary with the model's
 decision, and every step found, kept or not.
 
@@ -71,6 +82,7 @@ decision, and every step found, kept or not.
 4. **Grasp events**: per hand, the grip aperture (thumb–index tip distance over palm length) with hysteresis and a 0.3 s minimum gives a timeline of grasps (closing) and releases (opening).
 5. **Sub-steps**: inside each stretch with hands in view (gaps under 1 s bridged), candidate boundaries come from the hand signals: grasp and release, a hand entering or leaving the view, wrist pauses, the hands meeting or parting. With `--caption` the model looks at frames just before and just after each candidate and says whether a new step starts there; confirmed cuts are kept strongest first, at least `--min-seconds` (2 s) apart, and steps longer than `--max-seconds` (15 s) are split at their strongest remaining candidate. Without `--caption`, a cut needs two signals agreeing.
 6. **Language** (optional): [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) sees three full frames of the step and three close-ups cropped around the hands (so that what is in the hands counts, not finished items in the background) and writes an imperative instruction naming the object. Each step is then captioned a second time from other moments of the step, without the first answer; if the two disagree on the action or the object, or the instruction is not an imperative naming the object, the step is kept but marked `verified: false` (`--drop-unverified` leaves it out). It runs locally through [MLX](https://github.com/Blaizzy/mlx-vlm) on Apple silicon, through Hugging Face transformers on an NVIDIA GPU (`--caption-backend transformers`), or on any OpenAI-compatible server such as vLLM (`--caption-url http://host:8000/v1`). Same prompts and output for all three; see [docs/linux_gpu.md](docs/linux_gpu.md). Steps it calls idle are dropped.
+7. **Step types** (optional, `--step-vocab`): the model gets the same images as for a caption and the numbered list of step types, and answers with one number, or 0 for "none of these". A second pick, from the other moments of the step and with the list rotated by half its length (so every type has another number and a preference for a position does not look like agreement), must give the same type. Then the step's `task` is that type's text and `step_type` its number. If either pick is 0 or the two differ, the step gets the free caption of step 6 and is marked `verified: false`. `--step-vocab auto` first writes a free caption for every step, asks the model (text only) to group the captions into 4 to 12 step types, and drops types that fewer than two captions support or that name an object found in only one caption; the list is saved next to the dataset as `OUT_step_vocab.txt`, and the proposals with the reason for each drop go to `meta/step_vocab.json`.
 
 Everything runs locally; no video leaves your machine.
 
@@ -106,6 +118,13 @@ Stereo limits: the two videos must start on the same frame (frames are paired by
 - **Depth comes from the average human hand size, not a depth sensor.** Expect errors of a few centimetres in distance.
 - Fast, blurred or gloved hands are often missed. Left and right are sometimes swapped when only one hand is visible.
 - Captions are machine-written and can be generic or wrong; check them before relying on them. The verification pass catches only some wrong captions, and `verified: true` is not proof.
+- Step types are only as good as the list and the model's eye. On two 90 to 100 s factory clips (34 steps, judged by
+  eye, 8B model on a Mac), a list written by someone who had watched the clips raised the share of right step labels
+  from 50% (free captions) to 68%, but the model still confused two similar types (folding a flap of the flat blank
+  versus standing the box up), and its pick changed with the order of the list for about a third of those steps, so
+  two agreeing picks are weak evidence when types look alike. `--step-vocab auto` inherits the wording of the free
+  captions: on the same clips it kept 2 and 3 generic or overlapping types, gave fewer wrong labels (15% against 24%)
+  and about as many right ones (53% against 50%), the rest generic.
 - Step boundaries come from noisy hand signals and one model's judgement; expect missed and extra cuts, especially for short steps (about 2 s) and when the hands leave the view. One long repeated action (inserting cables one after another) is often cut into several 2–5 s steps with the same instruction; `--merge-agreeing` joins neighbours whose captions agree, at the cost of sometimes joining two different actions.
 - The language step needs Apple silicon or a GPU. The GPU path is new and not yet verified on real hardware (checklist in [docs/linux_gpu.md](docs/linux_gpu.md)). Detection, 3D, export and the QC report run anywhere Python runs.
 

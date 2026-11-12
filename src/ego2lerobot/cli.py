@@ -70,7 +70,8 @@ def events_between(events: dict, start: int, end: int, fps: float) -> list[dict]
 
 
 def action_steps(video: Path, track: HandTrack, events: dict, captioner, args, min_seconds: float, entry: dict):
-    """--segment action: steps that follow the work, each with its first caption (None without --caption).
+    """--segment action: steps that follow the work, each with its first caption (None without --caption, and with
+    --step-vocab FILE unless --merge-agreeing needs it).
 
     Cuts come from find_steps (checked by the captioner). Steps with too little hand in view are dropped. With
     --merge-agreeing, touching neighbours whose first captions agree (same kind of action on the same object) are
@@ -87,7 +88,8 @@ def action_steps(video: Path, track: HandTrack, events: dict, captioner, args, m
     low = [s for s in steps if s.hand_coverage < args.min_coverage]
     steps = [s for s in steps if s.hand_coverage >= args.min_coverage]
     firsts = [None] * len(steps)
-    if captioner:
+    vocab_file = getattr(args, "step_vocab", None) not in (None, "auto")
+    if captioner and not (vocab_file and not args.merge_agreeing):
         from .caption import captions_agree
         firsts = [captioner.caption(video, track, s.start, s.end) for s in steps]
         if args.merge_agreeing:
@@ -110,8 +112,17 @@ def run(args) -> None:
         from .caption import Captioner, StepCaptioner
         captioner = (StepCaptioner if action else Captioner)(args.caption_model, backend=args.caption_backend,
                                                              url=args.caption_url)
-    episodes, videos, dropped, grasp = [], [], [], {}
-    for video in args.videos:
+    typer, vocab = None, None
+    if args.step_vocab and not (args.caption and action):
+        raise SystemExit("--step-vocab needs --caption and --segment action")
+    if args.step_vocab and args.step_vocab != "auto":
+        from .vocab import StepTyper, load_vocab
+        vocab = {"source": "file", "file": portable(Path(args.step_vocab), args.out), "types": load_vocab(args.step_vocab)}
+        if not vocab["types"]:
+            raise SystemExit(f"{args.step_vocab}: no step types (one per line)")
+        typer = StepTyper(captioner, vocab["types"])
+
+    def prepare_video(video):
         camera = camera_for(video, args)
         view = None
         if args.rectify:
@@ -119,7 +130,6 @@ def run(args) -> None:
             view = PinholeView(camera, args.rectify)
         track = cached_track(video, cache, view)
         events = grasp_events(track)
-        grasp[video.name] = {"fps": track.fps, **events}
         entry = {"name": video.name, "path": portable(video, args.out), "track": track_path(video, cache, view).name,
                  "camera": asdict(camera)}
         side = video.with_suffix(".source.json")  # written by `ego2lerobot prepare`
@@ -130,6 +140,16 @@ def run(args) -> None:
             items = action_steps(video, track, events, captioner, args, min_seconds, entry)
         else:
             items = [(seg, None) for seg in find_segments(track, min_seconds, args.max_seconds, min_coverage=args.min_coverage)]
+        return camera, track, events, entry, items
+
+    prepared = {}
+    if args.step_vocab == "auto":  # all first captions are needed before the list can be built
+        prepared = {video: prepare_video(video) for video in args.videos}
+        typer, vocab = auto_vocab(captioner, [f for *_, items in prepared.values() for _, f in items], args.out)
+    episodes, videos, dropped, grasp = [], [], [], {}
+    for video in args.videos:
+        camera, track, events, entry, items = prepared.pop(video) if video in prepared else prepare_video(video)
+        grasp[video.name] = {"fps": track.fps, **events}
         videos.append(entry)
         if args.per_video:
             items = spread(items, args.per_video)
@@ -141,6 +161,8 @@ def run(args) -> None:
             if captioner:
                 if not action:
                     caption = captioner(video, seg.start, seg.end, track.fps)
+                elif typer:
+                    caption = typer(video, track, seg.start, seg.end, first)
                 elif first["task"] == "idle":
                     caption = first
                 else:
@@ -155,8 +177,8 @@ def run(args) -> None:
                                     "task": caption.get("task")})
                     continue
                 task = caption.get("task") or task
-                info.update({k: caption[k] for k in ("steps", "object", "objects", "verified", "confidence",
-                                                      "check", "caption_problems") if k in caption})
+                info.update({k: caption[k] for k in ("steps", "object", "objects", "step_type", "verified",
+                                                      "confidence", "check", "caption_problems") if k in caption})
             info["grasp_events"] = events_between(events, seg.start, seg.end, track.fps)
             episodes.append(Episode(video, camera, track, seg, task.strip(), info))
         print(f"{video.name}: {len(items)} {'steps' if action else 'episodes'}", flush=True)
@@ -166,9 +188,46 @@ def run(args) -> None:
     settings = {"segment": args.segment, "min_seconds": min_seconds, "max_seconds": args.max_seconds, "gap_seconds": 1.0,
                 "min_coverage": args.min_coverage, "per_video": args.per_video, "step": args.step, "width": args.width,
                 "rectify": args.rectify, "drop_unverified": args.drop_unverified, "merge_agreeing": args.merge_agreeing}
+    if vocab:
+        settings["step_vocab"] = "auto" if vocab["source"] == "auto" else vocab["file"]
+        write_step_vocab(args.out, vocab)
     write_run_log(args.out, settings, videos, dropped, bool(args.caption), args.default_task)
     report = write_report(args.out, cache)
     print(f"QC report: {args.out / 'qc_report.md'} ({report['overall']['flagged_episodes']} episodes with warnings)")
+
+
+def vocab_path(out: Path) -> Path:
+    """Where --step-vocab auto saves the list it built: next to the dataset, so that a re-run does not delete it."""
+    return out.with_name(out.name + "_step_vocab.txt")
+
+
+def auto_vocab(captioner, firsts: list, out: Path):
+    """--step-vocab auto: (StepTyper or None, metadata) from the first captions of every step of every video."""
+    from .vocab import StepTyper, build_vocab, save_vocab
+    built = build_vocab(captioner, firsts)
+    path = vocab_path(out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_vocab(path, built["types"], [f"Step types built by --step-vocab auto from {len(built['captions'])} step captions.",
+                                      "Edit (one imperative step type per line) and re-run with --step-vocab FILE."])
+    if built["types"]:
+        print(f"step vocabulary ({len(built['types'])} types) saved to {path}:", *built["types"], sep="\n  ", flush=True)
+    else:
+        print("step vocabulary: no step type passed the checks; using free captions", flush=True)
+    vocab = {"source": "auto", "file": path.name, **built}
+    return (StepTyper(captioner, built["types"]) if built["types"] else None), vocab
+
+
+def write_step_vocab(dataset: Path, vocab: dict) -> None:
+    """meta/step_vocab.json: the list of step types and how many delivered episodes have each."""
+    counts = [0] * (len(vocab["types"]) + 1)
+    for ep in json.loads((dataset / "meta" / "episodes_info.json").read_text()):
+        counts[ep.get("step_type") or 0] += 1
+    about = ("Closed list of step types. In meta/episodes_info.json, step_type is the 1-based number of an "
+             "episode's type in `types` (its task is that type's text), or 0 when the two picks did not agree on a "
+             "type and the episode has a free caption instead (verified: false).")
+    (dataset / "meta" / "step_vocab.json").write_text(json.dumps(
+        {"about": about, **vocab, "episodes_per_type": {"0": counts[0], **{str(k): c for k, c in enumerate(counts[1:], 1)}}},
+        indent=1, ensure_ascii=False))
 
 
 def write_grasp_events(dataset: Path, grasp: dict) -> None:
@@ -213,6 +272,10 @@ def main(argv=None) -> None:
     r.add_argument("--merge-agreeing", action="store_true",
                    help="merge touching steps whose captions agree (fewer, longer steps; on the evaluation clips this "
                         "cost recall and caption accuracy, so it is off by default)")
+    r.add_argument("--step-vocab", metavar="FILE|auto",
+                   help="label each step with one type from a closed list instead of a free caption: a text file, one "
+                        "imperative step type per line, or 'auto' to build the list from the video (saved as "
+                        "OUT_step_vocab.txt); needs --caption")
     r.add_argument("--drop-unverified", action="store_true",
                    help="leave out steps whose caption fails verification (default: keep them, marked verified: false)")
     r.add_argument("--min-coverage", type=float, default=0.7, help="share of frames that must show a hand")
