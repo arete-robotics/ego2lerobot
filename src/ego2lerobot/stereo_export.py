@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import av
@@ -15,7 +15,7 @@ from .export import LEFT_COLOUR, RIGHT_COLOUR, remove_empty_dirs
 from .export import features as mono_features
 from .hands import BONES, JOINTS, SIDES, end_effector
 from .segments import Segment
-from .stereo import REASONS, StereoLabels, StereoRig, per_frame, summarize
+from .stereo import REASONS, Checks, StereoLabels, StereoRig, per_frame, summarize
 from .stereo_video import StereoVideo, h264_stream
 
 
@@ -147,10 +147,30 @@ class Preview:
         self.container.close()
 
 
+def checks_dict(checks: Checks, rig: StereoRig) -> dict:
+    """The triangulation checks as given (pixel limits as shares of the image height) and in pixels for `rig`."""
+    return {**asdict(checks), "image_height": rig.height, "max_epipolar_px": round(checks.max_epipolar * rig.height, 2),
+            "max_reprojection_px": round(checks.max_reprojection * rig.height, 2)}
+
+
+def write_grasp_events(dataset: str | Path, grasp: dict) -> None:
+    """meta/grasp_events.json for a stereo dataset: the same layout as `run` writes, from the triangulated joints."""
+    from . import signals
+    about = ("Per hand, frames where the grip closes (grasp) or opens (release). Grip aperture = thumb-tip to index-tip "
+             "distance / wrist to middle-finger knuckle distance, both from the triangulated 3D joints; closed below "
+             "`close`, open above `open`, a state must last `min_state_s`; no event is emitted across a gap longer than "
+             "`max_gap_s` without a triangulated hand. Frames and times refer to the source video.")
+    (Path(dataset) / "meta" / "grasp_events.json").write_text(json.dumps(
+        {"about": about, "source": "stereo triangulation",
+         "thresholds": {"close": signals.CLOSE, "open": signals.OPEN, "min_state_s": signals.MIN_STATE_S,
+                        "max_gap_s": signals.MAX_GAP_S}, "videos": grasp}, indent=1))
+
+
 def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id: str, width: int = 640, step: int = 2,
-                         preview_dir: str | Path | None = None, previews: int = 12) -> dict:
+                         preview_dir: str | Path | None = None, previews: int = 12, checks: Checks | None = None) -> dict:
     """Write `episodes` to a fresh LeRobot dataset at `out`, keeping every `step`-th frame, plus meta/calibration.json,
-    meta/triangulation_stats.json, meta/episodes_info.json and meta/imu/episode_NNNNNN.csv."""
+    meta/triangulation_stats.json, meta/episodes_info.json and meta/imu/episode_NNNNNN.csv. `checks` (the ones given
+    to label_stereo) are recorded in triangulation_stats.json for the QC report."""
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     if not episodes:
@@ -202,7 +222,7 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
         index = len(meta)
         if ep.imu:
             imu_slices.append((index, ep.imu, ep.segment.start / video.fps, ep.segment.end / video.fps))
-        source = {"left": video.left.name, "right": video.right.name if video.right else None,
+        source = {"video": video.left.name, "left": video.left.name, "right": video.right.name if video.right else None,
                   "side_by_side": video.right is None, "start_frame": ep.segment.start, "end_frame": ep.segment.end}
         parts.append((lab, kept, ep.rig))
         stats.append({"episode_index": index, "source": source, "summary": summarize(parts[-1:]),
@@ -224,7 +244,8 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
     overall = summarize(parts) if parts else {}
     (meta_dir / "triangulation_stats.json").write_text(json.dumps({
         "about": "Per stored frame and hand: reason codes " + json.dumps({str(k): v for k, v in REASONS.items()})
-                 + "; pixel errors at the original video size.", "summary": overall, "episodes": stats}, indent=None))
+                 + "; pixel errors at the original video size.", "summary": overall,
+        "checks": checks_dict(checks, first.rig) if checks else None, "episodes": stats}, indent=None))
     summary = {"episodes": len(meta), "frames": sum(m["frames"] for m in meta), "fps": fps,
                "minutes": round(sum(m["frames"] for m in meta) / fps / 60, 1), **{k: overall.get(k) for k in (
                    "valid_triangulation_rate", "reprojection_px_median")}}
