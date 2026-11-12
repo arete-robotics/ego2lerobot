@@ -116,6 +116,28 @@ class MLXBackend:
         return result.text if hasattr(result, "text") else str(result)
 
 
+def plain_linear_where_not_quantized(model) -> int:
+    """Pre-quantized bitsandbytes checkpoints can store some layers (the vision tower) unquantized, while the loader
+    still builds 4-bit layers for them; those layers then fail on the first forward pass. Give them back a plain
+    linear layer with the stored weights. Returns the number of layers replaced (0 without bitsandbytes)."""
+    try:
+        from bitsandbytes.nn import Linear4bit
+    except ImportError:
+        return 0
+    from torch import nn
+    swaps = [(name, m) for name, m in model.named_modules()
+             if isinstance(m, Linear4bit) and m.weight.shape[1] != 1 and getattr(m.weight, "quant_state", None) is None]
+    for name, old in swaps:
+        new = nn.Linear(old.in_features, old.out_features, bias=old.bias is not None,
+                        device=old.weight.device, dtype=old.weight.dtype)
+        new.weight = nn.Parameter(old.weight.data, requires_grad=False)
+        if old.bias is not None:
+            new.bias = nn.Parameter(old.bias.data, requires_grad=False)
+        parent = model.get_submodule(name.rpartition(".")[0]) if "." in name else model
+        setattr(parent, name.rpartition(".")[2], new)
+    return len(swaps)
+
+
 class TransformersBackend:
     """Qwen3-VL through Hugging Face transformers; bf16 on a CUDA GPU (device_map="auto")."""
 
@@ -124,6 +146,7 @@ class TransformersBackend:
         name = model or DEFAULT_MODELS["transformers"]
         self.processor = AutoProcessor.from_pretrained(name)
         self.model = AutoModelForImageTextToText.from_pretrained(name, dtype="auto", device_map=device_map)
+        plain_linear_where_not_quantized(self.model)
 
     def generate(self, images: list[str], prompt: str) -> str:
         from PIL import Image

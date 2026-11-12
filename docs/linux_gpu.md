@@ -13,14 +13,29 @@ prompt, decode greedily, and parse the reply into the same `{"task", "steps", "o
 All three default to Qwen3-VL-8B-Instruct (Apache 2.0): `Qwen/Qwen3-VL-8B-Instruct` in bf16 for `transformers` and
 vLLM, `mlx-community/Qwen3-VL-8B-Instruct-4bit` for MLX. Override with `--caption-model`.
 
-**Status: the CUDA path has not yet been run on a GPU.** What has been checked on a Mac: backend selection, the
-request sent to an OpenAI-compatible server and the reply parsing (unit tests with a fake server), and the
-`transformers` and `mlx` code paths end to end on a random-weight tiny Qwen3-VL. The steps below verify it on a GPU.
+**Status (2026-11-11).** The `transformers` backend has been run end to end on an RTX 4090 (Ubuntu 22.04, driver
+580.105, torch 2.15.0, transformers 5.22.2, mediapipe 1.2.2, lerobot 0.7.0): all tests pass, and hand detection
+matches the Mac tracks (median keypoint difference 0.01 to 0.1 px on two clips). The `openai` backend against a vLLM
+server (steps 4 and 5) has still only been checked against a fake server; it has not been run on a GPU.
+
+| Caption model | Peak GPU memory | Run time per minute of video* |
+|---|---|---|
+| `Qwen/Qwen3-VL-8B-Instruct`, bf16 | 17.7 GB | about 2.0 min |
+| `unsloth/Qwen3-VL-32B-Instruct-bnb-4bit` (needs `pip install bitsandbytes`) | 20.9 GB | about 2.7 min |
+
+*Two 90 to 100 s factory clips, action segmentation with the two-caption check, hand tracks already cached, model
+load included. Detection, export and previews without captions took about 1.8 min per minute of video on the same
+machine.
+
+On the same two clips the bf16 8B model captions about as well as the 4-bit MLX build (so quantization is not what
+limits it); the 32B model makes fewer wrong captions and its second-caption check catches more of them, but it words
+steps more generically. Numbers are in the evaluation notes, on 26 to 34 steps per model.
 
 ## 1. Set up (one machine, about 30 GB free disk)
 
 ```bash
-git clone https://github.com/ChizkiyahuOhayon/ego2lerobot && cd ego2lerobot
+apt-get install -y libegl1 libgles2   # MediaPipe needs libEGL.so.1 even on a headless machine
+git clone https://github.com/arete-robotics/ego2lerobot && cd ego2lerobot
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e ".[caption-cuda,test]"
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
@@ -79,11 +94,10 @@ Pass: the same episodes; tasks agree in meaning (exact wording can differ betwee
 ## 6. What to record
 
 GPU model, driver and CUDA version (`nvidia-smi`), `torch`, `transformers` and `vllm` versions, seconds per episode
-for each backend, and peak GPU memory. Then remove "has not yet been run on a GPU" from this page.
+for each backend, and peak GPU memory. For the vLLM path, then update the status at the top of this page.
 
 ## Throughput note for large jobs
 
 Detection is the slow CPU step: about 10 ms per frame at 960 px wide on one process, so one hour of 30 fps video
 takes roughly 20 minutes. Run `ego2lerobot prepare` first on 4K or 60 fps footage, and run one `ego2lerobot run`
-process per video file in parallel up to the number of CPU cores. Caption time per episode on a GPU is not measured
-yet (step 6); with vLLM, several `run` processes can share one server.
+process per video file in parallel up to the number of CPU cores. Caption time on one GPU is in the table at the top; with vLLM, several `run` processes can share one server.
