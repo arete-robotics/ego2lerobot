@@ -229,13 +229,13 @@ def clip(tmp_path) -> tuple[Path, Path]:
     return video, cache
 
 
-def run_with(tmp_path, clip, monkeypatch, backend, *extra):
+def run_with(tmp_path, clip, monkeypatch, backend, *extra, out=None):
     pytest.importorskip("lerobot")
     from ego2lerobot import caption
     from ego2lerobot.cli import main
     monkeypatch.setattr(caption, "make_backend", lambda *a, **k: backend)
     video, cache = clip
-    out = tmp_path / "work" / "ds"
+    out = out or tmp_path / "work" / "ds"
     main(["run", str(video), "--out", str(out), "--cache", str(cache), "--hfov", "90", "--width", "64", "--caption",
           *extra])
     meta = out / "meta"
@@ -263,7 +263,8 @@ def test_run_with_auto_vocab_saves_an_editable_list_next_to_the_dataset(tmp_path
     # two steps (cut at the grasp); the only proposed type lists one of them, so it is dropped: free captions are used
     groups = json.dumps({"types": [{"type": "fold the towel", "object": "towel", "steps": [1]}]})
     backend = Picker(captions=[FOLD, FOLD, FOLD2, FOLD2], boundary=CUT, groups=groups)
-    out, info, run, vocab = run_with(tmp_path, clip, monkeypatch, backend, "--step-vocab", "auto", "--min-seconds", "1")
+    out, info, run, vocab = run_with(tmp_path, clip, monkeypatch, backend, "--step-vocab", "auto", "--min-seconds", "1",
+                                     out=tmp_path / "not_made_yet" / "ds")  # the list is saved before the dataset
     assert vocab["source"] == "auto" and vocab["types"] == [] and vocab["proposed"][0]["dropped"] == "supported by 1 caption"
     assert [e["task"] for e in info] == ["fold the towel"] * 2 and all(e["verified"] for e in info)
     assert all("step_type" not in e for e in info)

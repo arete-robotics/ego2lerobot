@@ -206,6 +206,7 @@ def auto_vocab(captioner, firsts: list, out: Path):
     from .vocab import StepTyper, build_vocab, save_vocab
     built = build_vocab(captioner, firsts)
     path = vocab_path(out)
+    path.parent.mkdir(parents=True, exist_ok=True)
     save_vocab(path, built["types"], [f"Step types built by --step-vocab auto from {len(built['captions'])} step captions.",
                                       "Edit (one imperative step type per line) and re-run with --step-vocab FILE."])
     if built["types"]:
