@@ -110,9 +110,10 @@ class MLXBackend:
         self._generate, self._template = generate, apply_chat_template
         self.model, self.processor = load(model or DEFAULT_MODELS["mlx"])
 
-    def generate(self, images: list[str], prompt: str) -> str:
+    def generate(self, images: list[str], prompt: str, max_tokens: int = MAX_TOKENS) -> str:
         chat = self._template(self.processor, self.model.config, prompt, num_images=len(images))
-        result = self._generate(self.model, self.processor, chat, image=images, max_tokens=MAX_TOKENS, temperature=0.0, verbose=False)
+        result = self._generate(self.model, self.processor, chat, image=images or None, max_tokens=max_tokens,
+                                temperature=0.0, verbose=False)
         return result.text if hasattr(result, "text") else str(result)
 
 
@@ -148,13 +149,13 @@ class TransformersBackend:
         self.model = AutoModelForImageTextToText.from_pretrained(name, dtype="auto", device_map=device_map)
         plain_linear_where_not_quantized(self.model)
 
-    def generate(self, images: list[str], prompt: str) -> str:
+    def generate(self, images: list[str], prompt: str, max_tokens: int = MAX_TOKENS) -> str:
         from PIL import Image
         content = [{"type": "image", "image": Image.open(p).convert("RGB")} for p in images] + [{"type": "text", "text": prompt}]
         inputs = self.processor.apply_chat_template([{"role": "user", "content": content}], tokenize=True,
                                                     add_generation_prompt=True, return_dict=True, return_tensors="pt")
         inputs = inputs.to(self.model.device)
-        out = self.model.generate(**inputs, max_new_tokens=MAX_TOKENS, do_sample=False)
+        out = self.model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
         return self.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
 
 
@@ -168,10 +169,10 @@ class OpenAIBackend:
         self.api_key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY", "")
         self.timeout = timeout
 
-    def generate(self, images: list[str], prompt: str) -> str:
+    def generate(self, images: list[str], prompt: str, max_tokens: int = MAX_TOKENS) -> str:
         content = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(Path(p).read_bytes()).decode()}}
                    for p in images] + [{"type": "text", "text": prompt}]
-        body = {"model": self.model, "messages": [{"role": "user", "content": content}], "max_tokens": MAX_TOKENS, "temperature": 0.0}
+        body = {"model": self.model, "messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "temperature": 0.0}
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -418,14 +419,20 @@ class StepCaptioner:
         scale = image.width / track.width
         return image.crop(tuple(round(v * scale) for v in box))
 
-    def ask(self, images: list[Image.Image], prompt: str) -> dict:
+    def reply(self, images: list[Image.Image], prompt: str, max_tokens: int = MAX_TOKENS) -> str:
+        """The model's raw answer to `prompt` about `images` (scaled to `width` pixels, saved as JPEG)."""
         with tempfile.TemporaryDirectory() as tmp:
             paths = []
             for k, image in enumerate(images):
                 path = Path(tmp) / f"{k}.jpg"
                 image.resize((self.width, round(image.height * self.width / image.width))).save(path, quality=90)
                 paths.append(str(path))
-            reply = parse(self.backend.generate(paths, prompt))
+            if max_tokens == MAX_TOKENS:
+                return self.backend.generate(paths, prompt)
+            return self.backend.generate(paths, prompt, max_tokens=max_tokens)
+
+    def ask(self, images: list[Image.Image], prompt: str) -> dict:
+        reply = parse(self.reply(images, prompt))
         return reply if isinstance(reply, dict) else {}
 
     def boundary(self, video, track, at: int, lo: int, hi: int) -> dict:
@@ -437,11 +444,16 @@ class StepCaptioner:
         return {"new_step": yes(reply.get("new_step")), "before": str(reply.get("before", "")),
                 "after": str(reply.get("after", ""))}
 
+    def views(self, got: dict, track, at: list[int]) -> list[Image.Image]:
+        """Full frames at the frames `at` (those that could be read), then a close-up around the hands for each."""
+        at = [i for i in at if i in got]
+        return [got[i] for i in at] + [self.closeup(got[i], track, i) for i in at]
+
     def describe(self, got: dict, track, at: list[int]) -> dict:
         """One caption from full frames and hand close-ups at the frames `at`: {"instruction", "object", ...}."""
-        at = [i for i in at if i in got]
-        return self.ask([got[i] for i in at] + [self.closeup(got[i], track, i) for i in at],
-                        STEP_PROMPT.format(n=len(at), n1=len(at) + 1, m=2 * len(at)))
+        images = self.views(got, track, at)
+        n = len(images) // 2
+        return self.ask(images, STEP_PROMPT.format(n=n, n1=n + 1, m=2 * n))
 
     def caption(self, video, track, start: int, end: int) -> dict:
         """The first answer for frames [start, end): {"task", "object", "objects", "caption_problems"}."""
