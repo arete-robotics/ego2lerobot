@@ -1,8 +1,10 @@
-"""Automatic quality report for a dataset written by `ego2lerobot run`: qc_report.json, qc_report.md, qc_report.html.
+"""Automatic quality report for a dataset written by `ego2lerobot run` or `ego2lerobot stereo`: qc_report.json,
+qc_report.md, qc_report.html.
 
 Everything is computed from the pipeline's own output: the hand tracks in the cache, the delivered frames in
 data/*.parquet, meta/episodes_info.json, and meta/run.json (settings and dropped segments, written by `run`).
 There is no ground truth here. A high detection rate means MediaPipe reported a hand, not that the hand is right.
+For a stereo dataset the report adds a triangulation section (stereo_qc.py); its 3D figures are measured.
 """
 from __future__ import annotations
 
@@ -90,10 +92,11 @@ def hand_summary(c: dict, s: int) -> dict:
     }
 
 
-def episode_flags(hands: list[dict], any_hand: float | None, verified: bool | None = None) -> list[str]:
+def episode_flags(hands: list[dict], any_hand: float | None, verified: bool | None = None, what: str = "hand",
+                  ) -> list[str]:
     flags = ["caption not verified"] if verified is False else []
     if any_hand is not None and 1 - any_hand > FLAGS["missing"]:
-        flags.append(f"no hand in {1 - any_hand:.0%} of frames")
+        flags.append(f"no {what} in {1 - any_hand:.0%} of frames")
     checks = (("cut_by_border", "cut", "cut by border"), ("distance_implausible", "distance", "implausible distance"),
               ("jumps", "jumps", "wrist jumps"))
     for name, h in zip("LR", hands):
@@ -121,7 +124,7 @@ def problem_ranges(c: dict, fps: float, offset_s: float) -> list[dict]:
 # ---------- segment audit on the full hand track ----------
 
 def audit_segments(track: HandTrack, settings: dict, exported: set, idle: set, steps: list[dict] | None = None,
-                   unverified: set = frozenset()) -> list[dict]:
+                   unverified: set = frozenset(), coverage_name: str = "hand coverage") -> list[dict]:
     """Every hand-activity stretch in a video and what happened to it: kept, or dropped and why.
 
     `steps` are the steps `run --segment action` found (from meta/run.json); without them the equal-split segments
@@ -140,7 +143,7 @@ def audit_segments(track: HandTrack, settings: dict, exported: set, idle: set, s
         if key in exported:
             kind, reason = None, None
         elif coverage < s["min_coverage"]:
-            kind, reason = "low hand coverage", f"hand coverage {coverage:.2f} < {s['min_coverage']:g}"
+            kind, reason = "low hand coverage", f"{coverage_name} {coverage:.2f} < {s['min_coverage']:g}"
         elif key in idle:
             kind = reason = "caption said idle"
         elif key in unverified:
@@ -175,17 +178,23 @@ def video_ranges(track: HandTrack, segments: list[dict]) -> list[dict]:
 
 # ---------- reading a dataset ----------
 
-def _load_frames(dataset: Path) -> dict[int, dict[str, np.ndarray]]:
-    """Per episode index: kp2d (N, 2, 21, 3), kp3d (N, 2, 21, 3), valid (N, 2) from data/*/*.parquet."""
+def _load_frames(dataset: Path, stereo: bool = False) -> dict[int, dict[str, np.ndarray]]:
+    """Per episode index: kp2d (N, 2, 21, 3), kp3d (N, 2, 21, 3), valid (N, 2) from data/*/*.parquet. For a stereo
+    dataset kp2d is the left view's, and status (N, 2, 21) the per-joint kp3d_status."""
     import pyarrow.parquet as pq
 
-    cols = {"observation.hands.kp2d": (2, 21, 3), "observation.hands.kp3d": (2, 21, 3), "observation.hands.valid": (2,)}
+    cols = {"kp2d": ("observation.hands.kp2d.left" if stereo else "observation.hands.kp2d", (2, 21, 3)),
+            "kp3d": ("observation.hands.kp3d", (2, 21, 3)), "valid": ("observation.hands.valid", (2,))}
+    if stereo:
+        cols["status"] = ("observation.hands.kp3d_status", (2, 21))
     parts = []
     for f in sorted(dataset.glob("data/*/*.parquet")):
-        t = pq.read_table(f, columns=["episode_index", "frame_index", *cols])
+        names = set(pq.read_schema(f).names)
+        cols = {k: v for k, v in cols.items() if v[0] in names or k != "status"}
+        t = pq.read_table(f, columns=["episode_index", "frame_index", *(c for c, _ in cols.values())])
         d = {"episode_index": t.column("episode_index").to_numpy(), "frame_index": t.column("frame_index").to_numpy()}
-        for c, shape in cols.items():
-            d[c] = np.asarray(t.column(c).combine_chunks().flatten(), np.float64).reshape(-1, *shape)
+        for key, (c, shape) in cols.items():
+            d[key] = np.asarray(t.column(c).combine_chunks().flatten(), np.float64).reshape(-1, *shape)
         parts.append(d)
     if not parts:
         return {}
@@ -194,9 +203,14 @@ def _load_frames(dataset: Path) -> dict[int, dict[str, np.ndarray]]:
     for e in np.unique(allf["episode_index"]):
         idx = np.flatnonzero(allf["episode_index"] == e)
         idx = idx[np.argsort(allf["frame_index"][idx])]
-        out[int(e)] = {"kp2d": allf["observation.hands.kp2d"][idx], "kp3d": allf["observation.hands.kp3d"][idx],
-                       "valid": allf["observation.hands.valid"][idx]}
+        out[int(e)] = {k: allf[k][idx] for k in cols}
     return out
+
+
+def _video_of(episode: dict) -> str:
+    """The source video an episode came from (stereo datasets before `source.video`: the left file)."""
+    source = episode["source"]
+    return source.get("video") or source.get("left")
 
 
 def _video_facts(entry: dict, track: HandTrack | None, dataset: Path) -> dict:
@@ -233,16 +247,28 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
     run = json.loads(run_path.read_text()) if run_path.exists() else {}
     settings = {**DEFAULTS, **run.get("settings", {})}
     fps = float(info["fps"])
-    h, w = info["features"]["observation.images.ego"]["shape"][:2]
+    stereo = "observation.images.left" in info["features"]
+    h, w = info["features"]["observation.images.left" if stereo else "observation.images.ego"]["shape"][:2]
     cache = Path(cache) if cache else dataset.with_name(dataset.name + "_cache")
-    entries = run.get("videos") or [{"name": n, "track": str(cache / f"{Path(n).stem}.hands.npz")}
-                                    for n in dict.fromkeys(e["source"]["video"] for e in episodes)]
-    tracks = {}
+    suffix = ".stereo.npz" if stereo else ".hands.npz"
+    entries = run.get("videos") or [{"name": n, "track": str(cache / f"{Path(n).stem}{suffix}")}
+                                    for n in dict.fromkeys(_video_of(e) for e in episodes)]
+    tracks, labels = {}, {}
     for entry in entries:
         entry.setdefault("name", Path(entry.get("path", "?")).name)
         tpath = (cache / entry["track"]) if entry.get("track") else None  # a file name in the cache (older: absolute)
-        tracks[entry["name"]] = HandTrack.load(tpath) if tpath and tpath.exists() else None
-    frames = _load_frames(dataset)
+        tracks[entry["name"]] = None
+        if tpath and tpath.exists():
+            if stereo:  # the track the stereo steps were cut on: hands in view from the 2D detections
+                from .stereo import StereoLabels
+                labels[entry["name"]] = StereoLabels.load(tpath)
+                tracks[entry["name"]] = labels[entry["name"]].step_track()
+            else:
+                tracks[entry["name"]] = HandTrack.load(tpath)
+    frames = _load_frames(dataset, stereo)
+    if stereo:
+        from . import stereo_qc
+        tri, stereo_parts = stereo_qc.load(dataset), []
 
     report_eps, ranges, all_checks = [], [], []
     for e in episodes:
@@ -250,23 +276,35 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
         if c is None:
             continue
         checks = frame_checks(c["kp2d"], c["kp3d"], c["valid"], w, h)
+        if stereo:
+            stereo_qc.measured_jitter(checks, c["kp3d"], c["valid"], c.get("status"))
         all_checks.append(checks)
-        track = tracks.get(e["source"]["video"])
+        video = _video_of(e)
+        track = tracks.get(video)
         start_s = e["source"]["start_frame"] / track.fps if track is not None else None
         hands = [hand_summary(checks, s) for s in range(2)]
         any_hand = _share(checks["valid"].any(1))
         steps = e.get("steps") or []
         report_eps.append({
-            "episode_index": e["episode_index"], "video": e["source"]["video"],
+            "episode_index": e["episode_index"], "video": video,
             "start_s": round(start_s, 2) if start_s is not None else None, "seconds": round(len(checks["valid"]) / fps, 2),
             "frames": len(checks["valid"]), "any_hand": any_hand, "left": hands[0], "right": hands[1],
             "task": e.get("task"), "steps": len(steps) if isinstance(steps, list) else 0,
             "captioned": bool(run.get("caption")) and e.get("task") != run.get("default_task"),
             "verified": e.get("verified"), "confidence": e.get("confidence"),
-            "flags": episode_flags(hands, any_hand, e.get("verified")),
+            "flags": episode_flags(hands, any_hand, e.get("verified"), "3D hand" if stereo else "hand"),
         })
+        arrays = stereo_qc.episode_arrays(tri, e["episode_index"], c, checks) if stereo else None
+        if arrays is not None:
+            stereo_parts.append(arrays)
+            report_eps[-1]["stereo"] = stereo_qc.all_figures(arrays)
+            report_eps[-1]["flags"] += stereo_qc.episode_flags(report_eps[-1]["stereo"])
         if start_s is not None:
-            ranges += [{"video": e["source"]["video"], **r} for r in problem_ranges(checks, fps, start_s)]
+            found = problem_ranges(checks, fps, start_s)
+            if arrays is not None:  # say whether the hands were missing or seen but not triangulated
+                found = [r for r in found if r["reason"] != "no hand detected"] + stereo_qc.ranges(
+                    arrays, fps, start_s, MIN_RANGE_S)
+            ranges += [{"video": video, **r} for r in found]
 
     videos, dropped = [], []
     for entry in entries:
@@ -279,11 +317,15 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
             facts.update(left_detected=_share(score[:, 0]), right_detected=_share(score[:, 1]),
                          any_hand=_share(score.any(1)), both_hands=_share(score.all(1)),
                          left_cut=_share(cut[:, 0], score[:, 0]), right_cut=_share(cut[:, 1], score[:, 1]))
-            exported = {(e["source"]["start_frame"], e["source"]["end_frame"]) for e in episodes if e["source"]["video"] == name}
+            if name in labels:
+                valid = labels[name].valid
+                facts.update(left_3d=_share(valid[:, 0]), right_3d=_share(valid[:, 1]))
+            exported = {(e["source"]["start_frame"], e["source"]["end_frame"]) for e in episodes if _video_of(e) == name}
             mine = [d for d in run.get("dropped", []) if d.get("video") == name]
             idle = {(d["start"], d["end"]) for d in mine if d.get("reason", "caption said idle") == "caption said idle"}
             unverified = {(d["start"], d["end"]) for d in mine if d.get("reason") == "caption not verified"}
-            segs = audit_segments(track, settings, exported, idle, entry.get("steps"), unverified)
+            segs = audit_segments(track, settings, exported, idle, entry.get("steps"), unverified,
+                                  "3D hand coverage" if stereo else "hand coverage")
             dropped += [{"video": name, **{k: d[k] for k in ("start_s", "end_s", "kind", "reason")}} for d in segs if not d["kept"]]
             ranges += [{"video": name, **r} for r in video_ranges(track, segs)]
         videos.append(facts)
@@ -314,7 +356,7 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
     overall["dropped_segments"] = {"count": len(dropped), "by_reason": reasons}
     overall["flagged_episodes"] = sum(bool(e["flags"]) for e in report_eps)
     from . import __version__
-    return {
+    report = {
         "dataset": dataset.name, "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "tool": f"ego2lerobot {__version__}", "disclaimer": DISCLAIMER,
         "thresholds": {"wrist_distance_m": list(DIST_RANGE), "border_margin": BORDER, "jump_m": JUMP_M,
@@ -322,6 +364,10 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
         "settings": settings, "overall": overall, "videos": videos, "episodes": report_eps,
         "dropped_segments": dropped, "unusable_ranges": sorted(ranges, key=lambda r: r["start_s"] - r["end_s"]),  # longest first
     }
+    if stereo:
+        report["stereo"] = stereo_qc.section(tri, stereo_parts)
+        report["thresholds"]["stereo"] = stereo_qc.LIMITS
+    return report
 
 
 # ---------- rendering ----------
@@ -360,19 +406,23 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
     drop_text = str(drops["count"]) + (" (" + ", ".join(f"{k}: {v}" for k, v in drops["by_reason"].items()) + ")"
                                        if drops["count"] else "")
     length = o["episode_seconds"] or {}
+    stereo = "stereo" in r
     lines = [f"# QC report: {r['dataset']}", "",
              f"Generated {r['generated']} by {r['tool']}.", "",
              f"**{r['disclaimer']}**", "",
              "## Summary", "", "| Check | Result |", "|---|---|",
-             f"| Source video | {o['videos']} file(s), {o['source_minutes']} min |",
-             f"| Episodes | {o['episodes']} ({o['episode_minutes']} min at {o['fps']:g} fps, {o['image']}); "
+             f"| Source video | {o['videos']} {'stereo clip' if stereo else 'file'}(s), {o['source_minutes']} min |",
+             f"| Episodes | {o['episodes']} ({o['episode_minutes']} min at {o['fps']:g} fps, {o['image']}"
+             f"{' per view' if stereo else ''}); "
              f"length {_num(length.get('min'))}–{_num(length.get('max'))} s, median {_num(length.get('median'))} s |",
-             f"| Hand detected (episode frames) | left {_pct(L.get('detected'))}, right {_pct(R.get('detected'))}, "
-             f"any {_pct(o.get('any_hand'))}, both {_pct(o.get('both_hands'))} |",
-             f"| Hand cut by image border | left {_pct(L.get('cut_by_border'))}, right {_pct(R.get('cut_by_border'))} |",
+             f"| {'Hand in 3D' if stereo else 'Hand detected'} (episode frames) | left {_pct(L.get('detected'))}, "
+             f"right {_pct(R.get('detected'))}, any {_pct(o.get('any_hand'))}, both {_pct(o.get('both_hands'))} |",
+             f"| Hand cut by image border{' (left view)' if stereo else ''} | left {_pct(L.get('cut_by_border'))}, "
+             f"right {_pct(R.get('cut_by_border'))} |",
              f"| Wrist distance outside {DIST_RANGE[0]}–{DIST_RANGE[1]} m | left {_pct(L.get('distance_implausible'))}, "
              f"right {_pct(R.get('distance_implausible'))} |",
-             f"| Wrist jitter (median) | left {_num(L.get('jitter_px'), ' px')} / {_num(L.get('jitter_mm'), ' mm')} "
+             f"| Wrist jitter (median{', 3D measured' if stereo else ''}) | left {_num(L.get('jitter_px'), ' px')} / "
+             f"{_num(L.get('jitter_mm'), ' mm')} "
              f"(depth {_num(L.get('jitter_depth_mm'), ' mm')}), right {_num(R.get('jitter_px'), ' px')} / "
              f"{_num(R.get('jitter_mm'), ' mm')} (depth {_num(R.get('jitter_depth_mm'), ' mm')}) |",
              f"| Wrist jumps > {JUMP_M * 100:g} cm | left {_pct(L.get('jumps'))}, right {_pct(R.get('jumps'))} |",
@@ -381,13 +431,19 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
              f"| Step lengths | {hist or '–'} |",
              f"| Dropped segments | {drop_text} |",
              f"| Episodes with warnings | {o['flagged_episodes']} of {o['episodes']} |", ""]
-    lines += ["## Source videos", "", "| Video | Original | Processed | Any hand | Left | Right | Cut L / R |", "|---|---|---|---|---|---|---|"]
+    if stereo:
+        from .stereo_qc import markdown as stereo_markdown
+        lines += stereo_markdown(r["stereo"], r["episodes"])
+    extra = " | In 3D L / R" if stereo else ""
+    lines += ["## Source videos", "", f"| Video | Original | Processed | Any hand | Left | Right | Cut L / R{extra} |",
+              "|---|---|---|---|---|---|---|" + ("---|" if stereo else "")]
     for v in r["videos"]:
         orig = v.get("original")
         o_txt = f"{orig['width']}×{orig['height']} {orig['fps']:g} fps {orig.get('codec', '')}, {orig['seconds']} s" if orig else "same"
         p_txt = f"{v.get('width')}×{v.get('height')} {_num(v.get('fps'))} fps, {_num(v.get('seconds'))} s"
+        in3d = f" | {_pct(v.get('left_3d'))} / {_pct(v.get('right_3d'))}" if stereo else ""
         lines.append(f"| {v['video']} | {o_txt} | {p_txt} | {_pct(v.get('any_hand'))} | {_pct(v.get('left_detected'))} | "
-                     f"{_pct(v.get('right_detected'))} | {_pct(v.get('left_cut'))} / {_pct(v.get('right_cut'))} |")
+                     f"{_pct(v.get('right_detected'))} | {_pct(v.get('left_cut'))} / {_pct(v.get('right_cut'))}{in3d} |")
     lines += ["", "## Episodes", "", "| # | Start | s | Left | Right | Cut L / R | Jitter L / R | Task | Check | Warnings |",
               "|---|---|---|---|---|---|---|---|---|---|"]
     for e in r["episodes"]:
@@ -406,11 +462,18 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
                   for u in r["unusable_ranges"][:max_rows]]
     else:
         lines.append("None of at least 1 s.")
-    lines += ["", "## How to read this", "",
-              "- *Detected*: MediaPipe reported the hand and its 3D placement succeeded. Episode figures use the delivered frames.",
+    if stereo:
+        from .stereo_qc import HOW_TO_READ
+        intro = ["- *Any hand / Left / Right* (source videos): the hand was detected in at least one of the two views.",
+                 *HOW_TO_READ]
+    else:
+        intro = ["- *Detected*: MediaPipe reported the hand and its 3D placement succeeded. Episode figures use the "
+                 "delivered frames."]
+    lines += ["", "## How to read this", "", *intro,
               f"- *Cut by border*: a keypoint lies within {BORDER:.0%} of the image width of the edge (or outside); "
               "keypoints of a cut hand are partly guessed.",
-              "- *Wrist distance*: from the average hand size, not a depth sensor; few-centimetre errors are normal.",
+              *([] if stereo else ["- *Wrist distance*: from the average hand size, not a depth sensor; few-centimetre "
+                                   "errors are normal."]),
               "- *Jitter*: median distance of the wrist from the midpoint of its neighbouring frames (half the "
               f"frame-to-frame acceleration), in pixels of the delivered {o['image']} image and in millimetres in 3D. "
               "*Depth* is the part along the viewing axis; when it makes up most of the 3D figure, the noise is in "
