@@ -13,6 +13,9 @@ prompt, decode greedily, and parse the reply into the same `{"task", "steps", "o
 All three default to Qwen3-VL-8B-Instruct (Apache 2.0): `Qwen/Qwen3-VL-8B-Instruct` in bf16 for `transformers` and
 vLLM, `mlx-community/Qwen3-VL-8B-Instruct-4bit` for MLX. Override with `--caption-model`.
 
+`--step-vocab` (step types, see the README) uses the same backends and images. `--step-vocab auto` adds one
+text-only request per run (no images, up to 1024 new tokens) that groups the step captions into a list.
+
 **Status (2026-11-11).** The `transformers` backend has been run end to end on an RTX 4090 (Ubuntu 22.04, driver
 580.105, torch 2.15.0, transformers 5.22.2, mediapipe 1.2.2, lerobot 0.7.0): all tests pass, and hand detection
 matches the Mac tracks (median keypoint difference 0.01 to 0.1 px on two clips). The `openai` backend against a vLLM
