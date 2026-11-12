@@ -114,6 +114,13 @@ Stereo limits: the two videos must start on the same frame (frames are paired by
 - **Depth comes from the average human hand size, not a depth sensor.** Expect errors of a few centimetres in distance.
 - Fast, blurred or gloved hands are often missed. Left and right are sometimes swapped when only one hand is visible.
 - Captions are machine-written and can be generic or wrong; check them before relying on them. The verification pass catches only some wrong captions, and `verified: true` is not proof.
+- Step types are only as good as the list and the model's eye. On two 90 to 100 s factory clips (34 steps, judged by
+  eye, 8B model on a Mac), a list written by someone who had watched the clips raised the share of right step labels
+  from 50% (free captions) to 68%, but the model still confused two similar types (folding a flap of the flat blank
+  versus standing the box up), and its pick changed with the order of the list for about a third of those steps, so
+  two agreeing picks are weak evidence when types look alike. `--step-vocab auto` inherits the wording of the free
+  captions: on the same clips it kept 2 and 3 generic or overlapping types, gave fewer wrong labels (15% against 24%)
+  and about as many right ones (53% against 50%), the rest generic.
 - Step boundaries come from noisy hand signals and one model's judgement; expect missed and extra cuts, especially for short steps (about 2 s) and when the hands leave the view. One long repeated action (inserting cables one after another) is often cut into several 2–5 s steps with the same instruction; `--merge-agreeing` joins neighbours whose captions agree, at the cost of sometimes joining two different actions.
 - The language step needs Apple silicon or a GPU. The GPU path is new and not yet verified on real hardware (checklist in [docs/linux_gpu.md](docs/linux_gpu.md)). Detection, 3D, export and the QC report run anywhere Python runs.
 
