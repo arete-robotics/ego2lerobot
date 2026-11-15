@@ -114,6 +114,22 @@ The QC report (`qc_report.md`, `.json`, `.html`) of a stereo dataset adds a *Ste
 
 Stereo limits: the two videos must start on the same frame (frames are paired by index); depth error grows with the square of distance (about 4 mm per pixel of disparity error at 0.5 m with f = 1000 px and a 6 cm baseline); 3D is relative to the head, because camera pose is not estimated; the IMU is passed through, not used. Stereo sub-steps and grasp events have been checked against known motion only on synthetic two-camera scenes; on real stereo video they have so far run only with an assumed calibration, so their accuracy there is not measured.
 
+## Check footage before you label or buy it
+
+```bash
+ego2lerobot verify FOLDER --claim width=1920 --claim height=1080 --claim fps=60 --claim imu_hz=200 --out report/
+```
+
+`verify` reads every video and IMU file in a folder and compares them with what the spec sheet says. It needs no model and no GPU. Six one-minute clips take about five seconds on a laptop.
+
+- **Video:** size, codec, audio, frame rate measured from the timestamps, the median and 99th percentile frame interval, and how many frames are missing.
+- **IMU:** samples over duration, which stays right when the intervals alternate. Empty files are listed.
+- **Stereo pairs:** files named left and right are matched. You get both frame counts and the offset between the two clocks.
+- **Repeated footage:** every pair of videos is compared. "Same recording" means the same pictures, even after trimming or re-encoding. "Same moment, other camera" means the same motion seen from a second camera, as in a stereo pair or two phones strapped together.
+- **Spec claims:** each `--claim` becomes one row: what the sheet says, what the files show, and whether they match.
+
+It does not yet check how often hands are in view. Run `ego2lerobot run` and `ego2lerobot qc` for that.
+
 ## Limitations
 - **Depth comes from the average human hand size, not a depth sensor.** Expect errors of a few centimetres in distance.
 - Fast, blurred or gloved hands are often missed. Left and right are sometimes swapped when only one hand is visible.
