@@ -205,7 +205,7 @@ def stereo_pairs(videos: list[Path]) -> list[tuple[Path, Path]]:
     return [(v["l"], v["r"]) for v in by_key.values() if {"l", "r"} <= set(v)]
 
 
-def pair_facts(left: Path, right: Path) -> dict:
+def pair_facts(left: Path, right: Path, rows: bool = True) -> dict:
     def stamps(p):
         with av.open(str(p)) as c:
             v = next(s for s in c.streams if s.type == "video")
@@ -213,8 +213,70 @@ def pair_facts(left: Path, right: Path) -> dict:
     a, b = stamps(left), stamps(right)
     n = min(len(a), len(b))
     off = np.abs((a[:n] - a[0]) - (b[:n] - b[0])) * 1e3
-    return {"left": str(left), "right": str(right), "frames_left": len(a), "frames_right": len(b),
-            "clock_offset_ms_median": round(float(np.median(off)), 3), "clock_offset_ms_max": round(float(off.max()), 3)}
+    out = {"left": str(left), "right": str(right), "frames_left": len(a), "frames_right": len(b),
+           "clock_offset_ms_median": round(float(np.median(off)), 3), "clock_offset_ms_max": round(float(off.max()), 3)}
+    if rows:
+        out["rows"] = row_alignment(left, right)
+    return out
+
+
+def _frames_at(path: Path, shares: list[float]) -> list[np.ndarray]:
+    """Grey frames at the given shares of the clip (0 = start, 1 = end)."""
+    out = []
+    with av.open(str(path)) as c:
+        v = next(s for s in c.streams if s.type == "video")
+        span = float(v.duration * v.time_base) if v.duration else float(c.duration or 0) / av.time_base
+        for share in shares:
+            c.seek(int(share * span / v.time_base), stream=v, any_frame=False, backward=True)
+            frame = next(c.decode(v), None)
+            if frame is not None:
+                out.append(frame.to_ndarray(format="gray"))
+    return out
+
+
+def row_alignment(left: Path, right: Path, frames: int = 6) -> dict | None:
+    """How well the rows of a stereo pair line up, from background features matched between the views.
+
+    In a rectified pair a point sits on the same row in both views. Returns the median row offset
+    (left minus right, pixels) and how it changes across the picture, or None without OpenCV."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    shares = [(k + 0.5) / frames for k in range(frames)]
+    a, b = _frames_at(left, shares), _frames_at(right, shares)
+    finder = cv2.SIFT_create(3000) if hasattr(cv2, "SIFT_create") else cv2.ORB_create(3000)
+    matcher = cv2.BFMatcher(cv2.NORM_L2 if hasattr(cv2, "SIFT_create") else cv2.NORM_HAMMING)
+    rows = []
+    for la, rb in zip(a, b):
+        k1, d1 = finder.detectAndCompute(la, None)
+        k2, d2 = finder.detectAndCompute(rb, None)
+        if d1 is None or d2 is None or len(k1) < 8 or len(k2) < 8:
+            continue
+        for m in matcher.knnMatch(d1, d2, k=2):
+            if len(m) == 2 and m[0].distance < 0.7 * m[1].distance:
+                (x1, y1), (x2, y2) = k1[m[0].queryIdx].pt, k2[m[0].trainIdx].pt
+                rows.append((x1 - la.shape[1] / 2, y1 - la.shape[0] / 2, y1 - y2, x1 - x2))
+    if len(rows) < 30:
+        return {"matches": len(rows), "error": "too few matched features"}
+    r = np.asarray(rows)
+    dy = r[:, 2]
+    med = float(np.median(dy))
+    keep = np.abs(dy - med) <= 3 * 1.4826 * float(np.median(np.abs(dy - med))) + 2   # drop wrong matches
+    r, dy = r[keep], dy[keep]
+    fit, *_ = np.linalg.lstsq(np.c_[np.ones(len(r)), r[:, 0] / 1000, r[:, 1] / 1000], dy, rcond=None)
+    left_over = dy - (fit[0] + fit[1] * r[:, 0] / 1000 + fit[2] * r[:, 1] / 1000)
+    q1, q3 = np.percentile(dy, [25, 75])
+    out = {
+        "matches": int(len(r)), "frames": len(a),
+        "row_offset_px_median": round(float(np.median(dy)), 2),
+        "row_offset_px_iqr": [round(float(q1), 2), round(float(q3), 2)],
+        "row_offset_change_px_per_1000px": {"across": round(float(fit[1]), 2), "down": round(float(fit[2]), 2)},
+        "row_scatter_px_after_fit": round(float(np.median(np.abs(left_over))), 2),
+        "disparity_px_median": round(float(np.median(r[:, 3])), 1),
+    }
+    out["rows_aligned"] = bool(abs(out["row_offset_px_median"]) <= 2.0 and max(abs(fit[1]), abs(fit[2])) <= 4.0)
+    return out
 
 
 def check_claims(claims: dict, videos: list[dict], imus: list[dict]) -> list[dict]:
@@ -286,6 +348,8 @@ def verify(paths: list[Path], claims: dict | None = None, duplicates: bool = Tru
         "imu_files": len(imus), "unreadable_imu_files": sum("error" in m for m in imus),
         "claims_checked": len(report["claims"]), "claims_not_matching": sum(not r["matches"] for r in report["claims"]),
         "repeats_outside_stereo_pairs": sum(not r["stereo_pair"] for r in report["repeats"]),
+        "stereo_pairs_with_rows_not_aligned": sum((p.get("rows") or {}).get("rows_aligned") is False
+                                                  for p in report["stereo_pairs"]),
     }
     return report
 
@@ -297,7 +361,8 @@ def to_markdown(report: dict) -> str:
            f"- Videos with frame timing faults: {s['videos_with_timing_faults']}.",
            f"- IMU files: {s['imu_files']}. Empty or unreadable: {s['unreadable_imu_files']}.",
            f"- Spec claims checked: {s['claims_checked']}. Not matching: {s['claims_not_matching']}.",
-           f"- Repeated footage outside stereo pairs: {s['repeats_outside_stereo_pairs']}.", ""]
+           f"- Repeated footage outside stereo pairs: {s['repeats_outside_stereo_pairs']}.",
+           f"- Stereo pairs whose rows do not line up: {s['stereo_pairs_with_rows_not_aligned']}.", ""]
     if report["claims"]:
         out += ["## Spec sheet against the files", "", "| Item | Sheet says | Files show | Match |", "|---|---|---|---|"]
         out += [f"| {r['item']} | {r['claimed']} | {r['measured']} | {'yes' if r['matches'] else '**no**'} |" for r in report["claims"]]
@@ -318,9 +383,18 @@ def to_markdown(report: dict) -> str:
             out.append(f"| {name} | **{m['error']}** | | | |" if "error" in m else
                        f"| {name} | {m['samples']} | {m['hz']} | {m['hz_from_median_interval']} | {m['gaps']} |")
     if report["stereo_pairs"]:
-        out += ["", "## Stereo pairs", "", "| Left | Right | Frames | Clock offset median / max (ms) |", "|---|---|---|---|"]
-        out += [f"| {Path(p['left']).name} | {Path(p['right']).name} | {p['frames_left']} / {p['frames_right']} | "
-                f"{p['clock_offset_ms_median']} / {p['clock_offset_ms_max']} |" for p in report["stereo_pairs"]]
+        out += ["", "## Stereo pairs", "",
+                "| Left | Right | Frames | Clock offset median / max (ms) | Row offset median (px) | Offset change across / down (px per 1000 px) | Rows line up |",
+                "|---|---|---|---|---|---|---|"]
+        for p in report["stereo_pairs"]:
+            r = p.get("rows") or {}
+            if "row_offset_px_median" in r:
+                c = r["row_offset_change_px_per_1000px"]
+                rows = f"{r['row_offset_px_median']} | {c['across']} / {c['down']} | {'yes' if r['rows_aligned'] else '**no**'}"
+            else:
+                rows = f"{r.get('error', 'not checked (needs OpenCV)')} | | "
+            out.append(f"| {Path(p['left']).name} | {Path(p['right']).name} | {p['frames_left']} / {p['frames_right']} | "
+                       f"{p['clock_offset_ms_median']} / {p['clock_offset_ms_max']} | {rows} |")
     if report["repeats"]:
         out += ["", "## Repeated footage", "", "| A | B | Finding | Picture match | Motion match | Offset (s) | Overlap (s) |", "|---|---|---|---|---|---|---|"]
         out += [f"| {Path(r['a']).name} | {Path(r['b']).name} | {r['verdict']}{' (stereo pair)' if r['stereo_pair'] else ''} | "

@@ -124,7 +124,7 @@ ego2lerobot verify FOLDER --claim width=1920 --claim height=1080 --claim fps=60 
 
 - **Video:** size, codec, audio, frame rate measured from the timestamps, the median and 99th percentile frame interval, and how many frames are missing.
 - **IMU:** samples over duration, which stays right when the intervals alternate. Empty files are listed.
-- **Stereo pairs:** files named left and right are matched. You get both frame counts and the offset between the two clocks.
+- **Stereo pairs:** files named left and right are matched. You get both frame counts, the offset between the two clocks, and whether the rows of the two views line up. The row check matches background features between the views (it needs OpenCV). A pair sold as rectified should show an offset near zero.
 - **Repeated footage:** every pair of videos is compared. "Same recording" means the same pictures, even after trimming or re-encoding. "Same moment, other camera" means the same motion seen from a second camera, as in a stereo pair or two phones strapped together.
 - **Spec claims:** each `--claim` becomes one row: what the sheet says, what the files show, and whether they match.
 

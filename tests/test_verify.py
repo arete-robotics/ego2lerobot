@@ -4,7 +4,9 @@ from fractions import Fraction
 import av
 import numpy as np
 
-from ego2lerobot.verify import check_claims, compare, imu_facts, probe, signature, stereo_pairs, verify
+import pytest
+
+from ego2lerobot.verify import check_claims, compare, imu_facts, probe, row_alignment, signature, stereo_pairs, verify
 
 
 def scene(n, seed, size=(160, 120)):
@@ -117,3 +119,24 @@ def test_stereo_pair_is_recognised_and_not_counted_as_a_repeat(tmp_path):
     r = verify([tmp_path], {"fps": "30"}, progress=False)
     assert r["stereo_pairs"][0]["frames_left"] == r["stereo_pairs"][0]["frames_right"] == 700
     assert r["summary"]["repeats_outside_stereo_pairs"] == 0 and r["summary"]["claims_not_matching"] == 0
+
+
+def textured(n, seed, size=(480, 360)):
+    """Frames with many corners: a fixed pattern of random blocks that drifts slowly."""
+    rng = np.random.default_rng(seed)
+    w, h = size
+    base = np.kron(rng.integers(0, 255, (h // 12 + 4, w // 12 + 8), dtype=np.uint8), np.ones((12, 12), np.uint8))
+    return [np.repeat(base[10:10 + h, 10 + i // 4:10 + i // 4 + w, None], 3, 2) for i in range(n)]
+
+
+def test_row_offset_between_stereo_views_is_measured(tmp_path):
+    pytest.importorskip("cv2")
+    frames = textured(60, 6)
+    write(tmp_path / "a_left.mp4", frames)
+    write(tmp_path / "a_right.mp4", [np.roll(f, (-9, -20), (0, 1)) for f in frames])   # 9 px higher, 20 px disparity
+    write(tmp_path / "b_left.mp4", frames)
+    write(tmp_path / "b_right.mp4", [np.roll(f, -20, 1) for f in frames])
+    off = row_alignment(tmp_path / "a_left.mp4", tmp_path / "a_right.mp4")
+    good = row_alignment(tmp_path / "b_left.mp4", tmp_path / "b_right.mp4")
+    assert abs(off["row_offset_px_median"] - 9) <= 1 and not off["rows_aligned"]
+    assert abs(good["row_offset_px_median"]) <= 1 and good["rows_aligned"]
