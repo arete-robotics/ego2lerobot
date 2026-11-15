@@ -11,6 +11,7 @@ import av
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from .angles import ANGLE_NAMES, joint_angles
 from .export import LEFT_COLOUR, RIGHT_COLOUR, remove_empty_dirs
 from .export import features as mono_features
 from .hands import BONES, JOINTS, SIDES, end_effector
@@ -68,6 +69,8 @@ def features(width: int, height: int, imu_names=()) -> dict:
         "observation.hands.kp2d.right": dict(mono["observation.hands.kp2d"]),
         "observation.hands.kp3d": mono["observation.hands.kp3d"],
         "observation.hands.kp3d_status": {"dtype": "float32", "shape": (42,), "names": [f"{s}_{j}" for s in SIDES for j in JOINTS]},
+        "observation.hands.joint_angles": {"dtype": "float32", "shape": (2 * len(ANGLE_NAMES),),
+                                           "names": [f"{s}_{a}" for s in SIDES for a in ANGLE_NAMES]},
         **{k: mono[k] for k in ("observation.hands.valid", "observation.hands.ee", "action")},
     }
     if imu_names:
@@ -84,6 +87,7 @@ def frame_labels(labels: StereoLabels, i: int, sx: float, sy: float) -> dict:
     f32 = lambda a: np.asarray(a, np.float32).reshape(-1)  # noqa: E731
     return {"observation.hands.kp2d.left": f32(kp2d[0]), "observation.hands.kp2d.right": f32(kp2d[1]),
             "observation.hands.kp3d": f32(np.nan_to_num(labels.kp3d[i])), "observation.hands.kp3d_status": f32(labels.status[i]),
+            "observation.hands.joint_angles": f32(np.nan_to_num(joint_angles(labels.kp3d[i]))),
             "observation.hands.valid": f32(valid), "observation.hands.ee": f32(ee)}
 
 
