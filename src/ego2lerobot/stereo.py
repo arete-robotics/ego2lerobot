@@ -324,7 +324,8 @@ class StereoLabels:
     kp2d:         (N, 2, 2, 21, 3) view (left, right camera) × hand × joint × (u, v, confidence), original pixels;
                   hand slots follow the 3D hands
     kp3d:         (N, 2, 21, 3) metres in the left camera frame, NaN where unknown
-    status:       (N, 2, 21) 0 unknown, 1 triangulated in this frame, 2 filled across a short gap
+    status:       (N, 2, 21) 0 unknown, 1 triangulated in this frame, 2 filled across a short gap, 3 placed from the
+                  hand's shape in a nearby measured frame (see stereo_fill)
     valid:        (N, 2) at least 15 joints known, including wrist, knuckles and thumb and index tips
     epipolar:     (N, 2) median row disagreement of the matched hand after rectification, pixels
     reprojection: (N, 2) median reprojection error of the kept joints, pixels
@@ -367,7 +368,9 @@ class StereoLabels:
         score: 1 where the hand is in view (detected in either camera, or labelled in 3D), so a stretch where
                triangulation failed is not a hand leaving or entering the view;
         world: the triangulated joints (metres, left camera frame; NaN where unknown), so the grip aperture
-               (thumb–index tip over wrist–middle knuckle) is measured, and unknown where triangulation failed;
+               (thumb–index tip over wrist–middle knuckle) is measured, and unknown where triangulation failed.
+               A hand placed from its shape (status 3) keeps the fingers of another frame, so its grip is
+               unknown too: no grasp or release is read from it;
         motion: the measured 3D wrists (signals.measured_motion) for pauses and hands meeting or parting;
         kp:    left-view pixels (for the captioner's close-ups): the left detection, else the 3D hand projected into
                the left view when `rig` is given, else the right detection (off by the disparity)."""
@@ -382,7 +385,9 @@ class StereoLabels:
                 pts = rig.project(self.kp3d[i, s][known], 0)
                 kp[i, s] = pts.mean(0)
                 kp[i, s][known] = pts
-        return MeasuredTrack(kp.astype(np.float32), self.kp3d.copy(), present.astype(np.float32), self.fps, self.width,
+        world = self.kp3d.copy()
+        world[(self.status == 3).any(-1)] = np.nan
+        return MeasuredTrack(kp.astype(np.float32), world, present.astype(np.float32), self.fps, self.width,
                              self.height, measured_motion(self.kp3d[:, :, 0], self.valid))
 
     def coverage(self, start: int, end: int) -> tuple[float, float]:
@@ -399,8 +404,11 @@ class MeasuredTrack(HandTrack):
     motion: Motion | None = None
 
 
-def label_stereo(rig: StereoRig, views, fps: float, checks: Checks | None = None) -> StereoLabels:
-    """`views`: per camera (kp (N, 2, 21, 2) pixels, conf (N, 2, 21), score (N, 2)) → StereoLabels."""
+def label_stereo(rig: StereoRig, views, fps: float, checks: Checks | None = None, fill: bool = True) -> StereoLabels:
+    """`views`: per camera (kp (N, 2, 21, 2) pixels, conf (N, 2, 21), score (N, 2)) → StereoLabels.
+
+    With `fill`, a hand that could not be triangulated in a frame is placed from its shape in a nearby measured frame,
+    fitted to the 2D keypoints (see stereo_fill); its joints get status 3."""
     checks = checks or Checks()
     n = min(len(views[0][2]), len(views[1][2]))
     X = np.full((n, 2, 21, 3), np.nan)
@@ -417,6 +425,13 @@ def label_stereo(rig: StereoRig, views, fps: float, checks: Checks | None = None
     valid = (known.sum(-1) >= 15) & known[..., NEEDED].all(-1)
     X[~valid] = np.nan
     status[~valid] = 0
+    if fill:
+        from .stereo_fill import PLACED, fill_hands, smooth_placed
+        filled, placed = fill_hands(rig, X, valid, views, fps)
+        if placed.any():
+            X = smooth_placed(filled, placed, fps)
+            status[placed] = PLACED
+            valid = valid | placed
     return StereoLabels(kp2d, X, status, valid, epi, rep, reason, fps, rig.width, rig.height)
 
 

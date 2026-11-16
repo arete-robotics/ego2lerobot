@@ -102,7 +102,8 @@ GAP = slice(int(5.0 * FPS), int(6.4 * FPS))  # 1.4 s while both hands carry: the
 
 @pytest.fixture(scope="module")
 def gap_labels(truth):
-    return label_stereo(RIG, detections(truth, hide_right_view=[(GAP, (0, 1))]), FPS)
+    # fill=False: these tests are about a gap that stays a gap (as with --no-fill, or where nothing can be placed)
+    return label_stereo(RIG, detections(truth, hide_right_view=[(GAP, (0, 1))]), FPS, fill=False)
 
 
 def test_grasp_and_release_events_from_the_measured_pinch(truth, clean_labels):

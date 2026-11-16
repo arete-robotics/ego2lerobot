@@ -67,7 +67,8 @@ def episode_arrays(tri: dict, index: int, frames: dict, checks: dict) -> dict | 
     return {"reason": np.array(per["reason"], int).reshape(-1, 2), "epipolar": _array(per["epipolar_px"]),
             "reprojection": _array(per["reprojection_px"]), "valid": frames["valid"] > 0,
             "depth": frames["kp3d"][:, :, 0, 2], "jitter_m": checks["jitter_m"], "jitter_z": checks["jitter_z"],
-            "triangulated": (status == 1).sum(-1) if status is not None else np.full((n, 2), np.nan)}
+            "triangulated": (status == 1).sum(-1) if status is not None else np.full((n, 2), np.nan),
+            "placed": (status == 3).any(-1) if status is not None else np.zeros((n, 2), bool)}
 
 
 def figures(a: dict, hands=(0, 1)) -> dict:
@@ -93,6 +94,7 @@ def figures(a: dict, hands=(0, 1)) -> dict:
         "rejected_share": round(1 - float(ok[both].mean()), 3) if both.any() else None,
         "triangulated_of_seen": _share(ok, seen) if seen.any() else None,
         "in_3d": _share(valid),
+        "placed": _share(get["placed"] & valid) if "placed" in get else None,
         "joints_triangulated": round(float(np.nanmean(joints)) / 21, 3) if np.isfinite(joints).any() else None,
         "epipolar_px": {"median": _q(get["epipolar"][ok], 50), "p95": _q(get["epipolar"][ok], 95),
                         "median_all_matched": _q(get["epipolar"][both], 50)},
@@ -267,7 +269,9 @@ def markdown(s: dict, episodes: list[dict]) -> list[str]:
                 ("Passed the triangulation checks (share of frames seen in both views)", lambda h: _pct(h["passed_checks"])),
                 ("Rejected, frames: one view only / epipolar / depth / hand size / few joints", rej),
                 ("Hand in 3D (share of delivered frames; gaps up to 0.35 s filled)", lambda h: _pct(h["in_3d"])),
-                ("Joints triangulated in their own frame (rest filled)", lambda h: _pct(h["joints_triangulated"])),
+                ("Hand placed from its shape in a nearby frame, status 3 (share of delivered frames; counted above)",
+                 lambda h: _pct(h.get("placed"))),
+                ("Joints triangulated in their own frame (rest filled or placed)", lambda h: _pct(h["joints_triangulated"])),
                 ("Epipolar error, median / 95th percentile (accepted hands)", lambda h: pair(h["epipolar_px"], " px")),
                 ("Reprojection error, median / 95th percentile (accepted hands)",
                  lambda h: pair(h["reprojection_px"], " px")),
@@ -297,7 +301,11 @@ def markdown(s: dict, episodes: list[dict]) -> list[str]:
 
 HOW_TO_READ = [
     "- *Hand in 3D* (stereo): the hand was triangulated from both views and passed the checks, or was filled "
-    "across a gap of at most 0.35 s. Episode figures use the delivered frames.",
+    "across a gap of at most 0.35 s, or was placed from its shape. Episode figures use the delivered frames.",
+    "- *Placed from its shape*: where the two views could not be matched (one hand hiding the other, or the hand "
+    "found in one view only), the hand's 3D shape from the nearest measured frame is moved rigidly onto the 2D "
+    "keypoints. Its position is an estimate and its fingers keep the pose of the measured frame. These joints "
+    "have kp3d_status 3; leave them out if you need measured values only.",
     "- *Seen in both views*: the hand detector found the hand in the left and in the right image of the same frame. "
     "*Passed the triangulation checks* is the share of those frames where the match was accepted.",
     "- *Epipolar error*: after rectification, a joint should lie on the same image row in both views; this is the "

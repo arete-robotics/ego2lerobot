@@ -42,6 +42,9 @@ def add_parser(sub) -> None:
                         "height (default 0.01: 10.8 px at 1080 rows)")
     s.add_argument("--max-reprojection", type=float, default=0.006,
                    help="largest reprojection error of one joint, as a share of the image height (default 0.006)")
+    s.add_argument("--no-fill", action="store_true",
+                   help="do not place hands that could not be triangulated from their shape in a nearby frame "
+                        "(kp3d_status 3); without it such hands are recovered where the 2D keypoints support them")
     s.add_argument("--caption", action="store_true", help="instructions from Qwen3-VL on the left view (see run --caption)")
     s.add_argument("--caption-backend", default="auto", choices=["auto", "mlx", "transformers", "openai"],
                    help="auto: openai if --caption-url is given, else mlx on Apple silicon, else transformers")
@@ -185,7 +188,8 @@ def run(args) -> None:
     for k, (left, right) in enumerate(clips):
         video = StereoVideo(left, right)
         rig = StereoRig.from_json(args.calib[k if len(args.calib) > 1 else 0], video.width, video.height)
-        labels = label_stereo(rig, views_for(video, cache, args.rtmpose, args.detect_width), video.fps, checks)
+        labels = label_stereo(rig, views_for(video, cache, args.rtmpose, args.detect_width), video.fps, checks,
+                              fill=not args.no_fill)
         labels.save(cache / f"{video.name}.stereo.npz")
         print(json.dumps({"clip": video.name, **summarize([(labels, slice(None), rig)])}), flush=True)
         track = labels.step_track(rig)
@@ -243,7 +247,7 @@ def run(args) -> None:
     settings = {"stereo": True, "segment": args.segment, "min_seconds": min_seconds, "max_seconds": args.max_seconds,
                 "gap_seconds": 1.0, "min_coverage": args.min_coverage, "per_video": args.per_video, "step": args.step,
                 "width": args.width, "drop_unverified": args.drop_unverified, "merge_agreeing": args.merge_agreeing,
-                "checks": checks_dict(checks, rig), "head_pose": bool(args.head_pose), "calibration": args.calib[0].name if len(args.calib) == 1 else [c.name for c in args.calib]}
+                "checks": checks_dict(checks, rig), "head_pose": bool(args.head_pose), "shape_fill": not args.no_fill, "calibration": args.calib[0].name if len(args.calib) == 1 else [c.name for c in args.calib]}
     write_run_log(args.out, settings, videos, dropped, bool(args.caption), args.default_task)
     report = write_report(args.out, cache)
     print(f"QC report: {args.out / 'qc_report.md'} ({report['overall']['flagged_episodes']} episodes with warnings)")
