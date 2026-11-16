@@ -345,6 +345,9 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
     overall["captions"] = {"enabled": bool(run.get("caption")), "captioned": sum(e["captioned"] for e in report_eps),
                            "with_steps": sum(e["steps"] > 0 for e in report_eps), "episodes": len(report_eps),
                            "idle_dropped": sum(d["kind"] == "caption said idle" for d in dropped)}
+    by_reviewer = [e for e in report_eps if e["verified"] and e["confidence"] is None and e.get("label_source")]
+    overall["captions"]["by_reviewer"] = {"episodes": len(by_reviewer),
+                                          "sources": sorted({e["label_source"] for e in by_reviewer})}
     checked = [e["verified"] for e in report_eps if e["verified"] is not None]
     overall["captions"]["verification"] = {
         "checked": len(checked), "verified": sum(checked), "flagged": len(checked) - sum(checked),
@@ -403,6 +406,17 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
     check = (f"{ver['verified']}/{ver['checked']} verified ({_pct(ver['rate'])}); {ver['flagged']} flagged as not "
              f"verified" + (f", {ver['unverified_dropped']} dropped" if ver.get("unverified_dropped") else "")
              ) if ver else "not run (captions off, or made with --segment fixed)"
+    named = cap.get("by_reviewer") or {"episodes": 0, "sources": []}
+    if named["episodes"]:
+        who = f"{named['episodes']}/{cap['episodes']} episodes named by a reviewer ({'; '.join(named['sources'])})"
+        if not cap["enabled"]:
+            captions = who + "; no model captions"
+        else:
+            captions += "; " + who
+        if ver and named["episodes"] == ver["checked"]:
+            check = "not run by the model: every step name was set by a reviewer"
+        else:
+            check += f"; {named['episodes']} of the verified were set by a reviewer, not checked by the model"
     hist = ", ".join(f"{k}: {v}" for k, v in (o.get("step_seconds") or {}).items())
     drops = o["dropped_segments"]
     drop_text = str(drops["count"]) + (" (" + ", ".join(f"{k}: {v}" for k, v in drops["by_reason"].items()) + ")"
@@ -485,7 +499,9 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
              "- *Caption check*: the model captions every step twice, from different moments of the step, without "
              "seeing its first answer. Steps where the two disagree on the action or the object, or whose instruction "
              "is not an imperative naming the object, are marked NOT VERIFIED. A verified caption can still be wrong: "
-             "both answers can share the same mistake (the number in brackets is the share of checks passed).",
+             "both answers can share the same mistake (the number in brackets is the share of checks passed). "
+             "A step renamed with `ego2lerobot relabel` shows where its name came from instead of a number; "
+             "the model did not check it.",
               "- *Unusable ranges*: time outside kept episodes (with the reason it was not kept), and stretches inside "
               "episodes where no hand is usable.", ""]
     return "\n".join(lines)

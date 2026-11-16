@@ -133,7 +133,7 @@ def test_write_report_end_to_end(tmp_path):
     o = report["overall"]
     assert o["episodes"] == 1 and o["frames"] == 60 and o["left"]["detected"] == 1.0 and o["right"]["detected"] == 0.5
     assert o["captions"] == {"enabled": True, "captioned": 1, "with_steps": 1, "episodes": 1, "idle_dropped": 0,
-                             "verification": None}
+                             "by_reviewer": {"episodes": 0, "sources": []}, "verification": None}
     assert report["videos"][0]["seconds"] == 10.0 and report["videos"][0]["any_hand"] == 0.4
     assert report["episodes"][0]["start_s"] == 1.0
     assert any("R implausible distance" in f for f in report["episodes"][0]["flags"])
@@ -177,3 +177,19 @@ def test_check_cell_for_names_set_by_a_reviewer():
     assert _check({"verified": True, "confidence": None, "label_source": "human review"}) == "verified (human review)"
     assert _check({"verified": False, "confidence": 0.5}) == "NOT VERIFIED (0.5)"
     assert _check({"verified": None}) == "–"
+
+
+def test_report_says_when_a_reviewer_named_the_steps(tmp_path):
+    """After `relabel`: no model captions, every name from a reviewer, so the report must not claim a model check."""
+    dataset, cache = write_fixture(tmp_path, [{
+        "episode_index": 0, "task": "slice the carrot", "frames": 60, "verified": True, "confidence": None,
+        "label_source": "human review", "source": {"video": "clip.mp4", "start_frame": 30, "end_frame": 150}}], {
+        "settings": {"segment": "action", "min_coverage": 0.7}, "caption": False, "default_task": "household task",
+        "videos": [{"name": "clip.mp4", "path": "clip.mp4", "track": "clip.hands.npz"}], "dropped": []})
+
+    report = write_report(dataset, cache)
+
+    assert report["overall"]["captions"]["by_reviewer"] == {"episodes": 1, "sources": ["human review"]}
+    md = (dataset / "qc_report.md").read_text()
+    assert "1/1 episodes named by a reviewer (human review); no model captions" in md
+    assert "every step name was set by a reviewer" in md and "1/1 verified" not in md
