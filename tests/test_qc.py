@@ -170,3 +170,10 @@ def test_report_counts_verified_steps_and_step_lengths(tmp_path):
 def test_length_histogram_edges():
     assert length_histogram([1.9, 2.0, 4.99, 5.0, 14.9, 15.0, 15.1]) == {"<2 s": 1, "2–5 s": 2, "5–10 s": 1, "10–15 s": 2,
                                                                          ">15 s": 1}
+
+
+def test_check_cell_for_names_set_by_a_reviewer():
+    from ego2lerobot.qc import _check
+    assert _check({"verified": True, "confidence": None, "label_source": "human review"}) == "verified (human review)"
+    assert _check({"verified": False, "confidence": 0.5}) == "NOT VERIFIED (0.5)"
+    assert _check({"verified": None}) == "–"

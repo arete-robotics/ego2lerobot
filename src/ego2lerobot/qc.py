@@ -291,7 +291,7 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
             "frames": len(checks["valid"]), "any_hand": any_hand, "left": hands[0], "right": hands[1],
             "task": e.get("task"), "steps": len(steps) if isinstance(steps, list) else 0,
             "captioned": bool(run.get("caption")) and e.get("task") != run.get("default_task"),
-            "verified": e.get("verified"), "confidence": e.get("confidence"),
+            "verified": e.get("verified"), "confidence": e.get("confidence"), "label_source": e.get("label_source"),
             "flags": episode_flags(hands, any_hand, e.get("verified"), "3D hand" if stereo else "hand"),
         })
         arrays = stereo_qc.episode_arrays(tri, e["episode_index"], c, checks) if stereo else None
@@ -387,7 +387,9 @@ def _clock(s) -> str:
 def _check(e: dict) -> str:
     if e.get("verified") is None:
         return "–"
-    return f"verified ({e['confidence']:g})" if e["verified"] else f"NOT VERIFIED ({e['confidence']:g})"
+    how = e.get("label_source") if e.get("confidence") is None else f"{e['confidence']:g}"
+    word = "verified" if e["verified"] else "NOT VERIFIED"
+    return f"{word} ({how})" if how else word
 
 
 def to_markdown(r: dict, max_rows: int = 15) -> str:
