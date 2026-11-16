@@ -300,14 +300,18 @@ def main(argv=None) -> None:
     q.add_argument("dataset", type=Path)
     q.add_argument("--cache", type=Path, help="hand detections (default: DATASET_cache)")
 
+    from . import relabel as relabel_cli
     from . import verify as verify_cli
     verify_cli.add_parser(sub)
+    relabel_cli.add_parser(sub)
 
     args = ap.parse_args(argv)
     if args.cmd == "stereo":
         return stereo_cli.run(args)
     if args.cmd == "verify":
         return verify_cli.run(args)
+    if args.cmd == "relabel":
+        return relabel_cli.run(args)
     if args.cmd == "run":
         run(args)
     elif args.cmd == "prepare":
