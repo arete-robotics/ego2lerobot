@@ -6,6 +6,8 @@
 
 **Sample output:** [arete-robotics/egocentric-10k-actions-sample](https://huggingface.co/datasets/arete-robotics/egocentric-10k-actions-sample) has 211 episodes from 28 factories in [Egocentric-10K](https://huggingface.co/datasets/builddotai/Egocentric-10K), labelled with this tool on one Mac mini in about two hours.
 
+**Stereo sample output:** [arete-robotics/stereo-hands-sample](https://huggingface.co/datasets/arete-robotics/stereo-hands-sample) has 109 steps of household and kitchen work from a calibrated head-mounted stereo pair, with both hands triangulated in 3D and finger joint angles.
+
 ## Install
 ```bash
 pip install git+https://github.com/arete-robotics/ego2lerobot
