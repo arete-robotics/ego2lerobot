@@ -23,7 +23,8 @@ def add_parser(sub) -> None:
     s = sub.add_parser("stereo", help="stereo videos + calibration → LeRobot dataset with triangulated hands",
                        description=DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("videos", nargs="+", type=Path, help="LEFT RIGHT [LEFT RIGHT ...], or side-by-side files with --sbs")
-    s.add_argument("--calib", type=Path, required=True, help="stereo calibration JSON, shared by all clips")
+    s.add_argument("--calib", type=Path, required=True, nargs="+",
+                   help="stereo calibration JSON: one shared by all clips, or one per clip in the same order")
     s.add_argument("--sbs", action="store_true", help="each video holds both views side by side, left camera on the left")
     s.add_argument("--imu", type=Path, nargs="+", help="one IMU CSV per clip, in the same order")
     s.add_argument("--out", type=Path, required=True)
@@ -140,6 +141,8 @@ def run(args) -> None:
         raise SystemExit("give videos as LEFT RIGHT pairs, or use --sbs for side-by-side files")
     else:
         clips = list(zip(args.videos[::2], args.videos[1::2]))
+    if len(args.calib) not in (1, len(clips)):
+        raise SystemExit(f"--calib needs one file, or one per clip ({len(clips)})")
     if args.imu and len(args.imu) != len(clips):
         raise SystemExit(f"--imu needs one file per clip ({len(clips)})")
     cache = args.cache or args.out.with_name(args.out.name + "_cache")
@@ -155,7 +158,7 @@ def run(args) -> None:
     episodes, videos, dropped, grasp = [], [], [], {}
     for k, (left, right) in enumerate(clips):
         video = StereoVideo(left, right)
-        rig = StereoRig.from_json(args.calib, video.width, video.height)
+        rig = StereoRig.from_json(args.calib[k if len(args.calib) > 1 else 0], video.width, video.height)
         labels = label_stereo(rig, views_for(video, cache, args.rtmpose, args.detect_width), video.fps, checks)
         labels.save(cache / f"{video.name}.stereo.npz")
         print(json.dumps({"clip": video.name, **summarize([(labels, slice(None), rig)])}), flush=True)
@@ -211,7 +214,7 @@ def run(args) -> None:
     settings = {"stereo": True, "segment": args.segment, "min_seconds": min_seconds, "max_seconds": args.max_seconds,
                 "gap_seconds": 1.0, "min_coverage": args.min_coverage, "per_video": args.per_video, "step": args.step,
                 "width": args.width, "drop_unverified": args.drop_unverified, "merge_agreeing": args.merge_agreeing,
-                "checks": checks_dict(checks, rig), "calibration": args.calib.name}
+                "checks": checks_dict(checks, rig), "calibration": args.calib[0].name if len(args.calib) == 1 else [c.name for c in args.calib]}
     write_run_log(args.out, settings, videos, dropped, bool(args.caption), args.default_task)
     report = write_report(args.out, cache)
     print(f"QC report: {args.out / 'qc_report.md'} ({report['overall']['flagged_episodes']} episodes with warnings)")

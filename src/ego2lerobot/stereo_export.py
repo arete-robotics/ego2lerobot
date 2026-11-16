@@ -243,6 +243,12 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
         imu.write(meta_dir / "imu" / f"episode_{index:06d}.csv", t0, t1)
     calibration = {"original": first.rig.to_dict(), "stored": first.rig.scaled(width, height).to_dict(),
                    "frame": "points in metres in the left camera frame: x right, y down, z forward"}
+    rigs = {}
+    for ep in episodes:  # one entry per source clip when clips came with their own calibration
+        rigs.setdefault(ep.video.left.name, ep.rig.to_dict())
+    if any(r != calibration["original"] for r in rigs.values()):
+        calibration["note"] = "clips have their own calibration; `original` and `stored` are those of the first clip"
+        calibration["clips"] = rigs
     (meta_dir / "calibration.json").write_text(json.dumps(calibration, indent=1))
     (meta_dir / "episodes_info.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False))
     overall = summarize(parts) if parts else {}

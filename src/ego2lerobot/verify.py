@@ -270,6 +270,7 @@ def row_alignment(left: Path, right: Path, frames: int = 6) -> dict | None:
     out = {
         "matches": int(len(r)), "frames": len(a),
         "row_offset_px_median": round(float(np.median(dy)), 2),
+        "row_offset_px_at_centre": round(float(fit[0]), 2),
         "row_offset_px_iqr": [round(float(q1), 2), round(float(q3), 2)],
         "row_offset_change_px_per_1000px": {"across": round(float(fit[1]), 2), "down": round(float(fit[2]), 2)},
         "row_scatter_px_after_fit": round(float(np.median(np.abs(left_over))), 2),
