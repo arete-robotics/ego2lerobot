@@ -16,7 +16,8 @@ from pathlib import Path
 DESCRIPTION = __doc__ + """
 The calibration format is described in ego2lerobot/stereo.py (intrinsics and distortion per camera, R and T from the
 left to the right camera in metres, or fx fy cx cy and baseline for a rectified pair). IMU CSV: a header row, first
-column t in seconds since the first video frame, other columns passed through."""
+column t in seconds since the first video frame, other columns passed through. For --head-pose with an IMU whose axes
+are not the left camera's, add "imu_to_camera" (a 3×3 rotation) to the calibration file."""
 
 
 def add_parser(sub) -> None:
@@ -27,6 +28,9 @@ def add_parser(sub) -> None:
                    help="stereo calibration JSON: one shared by all clips, or one per clip in the same order")
     s.add_argument("--sbs", action="store_true", help="each video holds both views side by side, left camera on the left")
     s.add_argument("--imu", type=Path, nargs="+", help="one IMU CSV per clip, in the same order")
+    s.add_argument("--head-pose", action="store_true",
+                   help="track the head by stereo visual odometry and add the head pose and the hands in a world frame "
+                        "(needs OpenCV). With --imu columns ax ay az, the world's y axis is set along gravity")
     s.add_argument("--out", type=Path, required=True)
     s.add_argument("--repo-id", default="local/ego2lerobot-stereo")
     s.add_argument("--rtmpose", action="store_true",
@@ -84,6 +88,28 @@ def views_for(video, cache: Path, rtmpose: bool, detect_width: int):
             rtm = rtmpose_views(video, tracks)
             np.savez_compressed(path, kp_left=rtm[0][0], conf_left=rtm[0][1], kp_right=rtm[1][0], conf_right=rtm[1][1])
     return [fuse(track, rtm[v] if rtm else None) for v, track in enumerate(tracks)]
+
+
+def head_pose_for(video, rig, labels, imu, calib_path: Path, cache: Path):
+    """The head pose of one clip (cached), levelled with the accelerometer when the IMU has one."""
+    import numpy as np
+
+    from .odometry import HeadPose, accel_columns, level, track_head
+    path = cache / f"{video.name}.head.npz"
+    if path.exists():
+        pose = HeadPose.load(path)
+    else:
+        pose = track_head(video, rig, labels.kp2d[:, 0], (labels.width, labels.height))
+        pose.save(path)
+    columns = accel_columns(imu.names) if imu else None
+    if columns:
+        to_camera = json.loads(Path(calib_path).read_text()).get("imu_to_camera")
+        try:
+            pose, _ = level(pose, imu.t, imu.values[:, columns], np.asarray(to_camera) if to_camera else None)
+        except ValueError as error:
+            print(f"{video.name}: world not levelled ({error})", flush=True)
+    print(json.dumps({"clip": video.name, "head_pose": {**pose.summary(), **pose.checks}}), flush=True)
+    return pose
 
 
 def with_3d_coverage(seg, labels):
@@ -179,6 +205,9 @@ def run(args) -> None:
         if args.per_video:
             items = spread(items, args.per_video)
         imu = Imu(args.imu[k]) if args.imu else None
+        head = head_pose_for(video, rig, labels, imu, args.calib[k if len(args.calib) > 1 else 0], cache) if args.head_pose else None
+        if head is not None:
+            entry["head"] = f"{video.name}.head.npz"
         for seg, first in items:  # captions and drops as in cli.run
             info = {"seconds": round(seg.seconds(video.fps), 2), "hand_coverage": seg.hand_coverage}
             if action:
@@ -204,7 +233,7 @@ def run(args) -> None:
                 info.update({k_: caption[k_] for k_ in ("steps", "object", "objects", "verified", "confidence",
                                                          "check", "caption_problems") if k_ in caption})
             info["grasp_events"] = events_between(events, seg.start, seg.end, video.fps)
-            episodes.append(StereoEpisode(video, rig, labels, seg, task.strip(), imu, info))
+            episodes.append(StereoEpisode(video, rig, labels, seg, task.strip(), imu, info, head))
         print(f"{video.name}: {len(items)} {'steps' if action else 'episodes'}", flush=True)
     if not episodes:
         raise SystemExit("no episode has enough frames with triangulated hands; see the statistics above "
@@ -214,7 +243,7 @@ def run(args) -> None:
     settings = {"stereo": True, "segment": args.segment, "min_seconds": min_seconds, "max_seconds": args.max_seconds,
                 "gap_seconds": 1.0, "min_coverage": args.min_coverage, "per_video": args.per_video, "step": args.step,
                 "width": args.width, "drop_unverified": args.drop_unverified, "merge_agreeing": args.merge_agreeing,
-                "checks": checks_dict(checks, rig), "calibration": args.calib[0].name if len(args.calib) == 1 else [c.name for c in args.calib]}
+                "checks": checks_dict(checks, rig), "head_pose": bool(args.head_pose), "calibration": args.calib[0].name if len(args.calib) == 1 else [c.name for c in args.calib]}
     write_run_log(args.out, settings, videos, dropped, bool(args.caption), args.default_task)
     report = write_report(args.out, cache)
     print(f"QC report: {args.out / 'qc_report.md'} ({report['overall']['flagged_episodes']} episodes with warnings)")

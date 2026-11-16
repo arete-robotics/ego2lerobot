@@ -25,6 +25,7 @@ BORDER = 0.01  # a hand is "cut" if a keypoint lies within this share of the ima
 JUMP_M = 0.05  # a wrist that leaves the line between its neighbouring frames by more than this has jumped
 MIN_RANGE_S = 1.0  # unusable ranges shorter than this are not listed
 FLAGS = {"missing": 0.2, "cut": 0.3, "distance": 0.1, "jumps": 0.05}  # per-episode warning thresholds (shares)
+HEAD_TRACKED = 0.8  # an episode whose head pose is solved in a smaller share of frames gets a warning
 DEFAULTS = {"min_seconds": 3.0, "max_seconds": 15.0, "gap_seconds": 1.0, "min_coverage": 0.7}
 
 
@@ -370,6 +371,18 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
     if stereo:
         report["stereo"] = stereo_qc.section(tri, stereo_parts)
         report["thresholds"]["stereo"] = stereo_qc.LIMITS
+    head_path = dataset / "meta" / "head_pose.json"
+    if head_path.exists():
+        tracked = {e["episode_index"]: e.get("head_pose", {}).get("tracked") for e in episodes}
+        for e in report_eps:
+            share = tracked.get(e["episode_index"])
+            if share is not None and share < HEAD_TRACKED:
+                e["flags"].append(f"head pose solved in {share:.0%} of frames")
+        overall["flagged_episodes"] = sum(bool(e["flags"]) for e in report_eps)
+        known = [(tracked[e["episode_index"]], e["frames"]) for e in report_eps if tracked.get(e["episode_index"]) is not None]
+        report["head_pose"] = {"clips": json.loads(head_path.read_text())["clips"],
+                               "tracked": round(sum(a * b for a, b in known) / max(1, sum(b for _, b in known)), 3)}
+        report["thresholds"]["head_pose_tracked"] = HEAD_TRACKED
     return report
 
 
@@ -377,6 +390,24 @@ def build_report(dataset: str | Path, cache: str | Path | None = None) -> dict:
 
 def _pct(x) -> str:
     return "–" if x is None else f"{x:.0%}"
+
+
+def head_markdown(h: dict) -> list[str]:
+    levelled = any("gravity" in c for c in h["clips"].values())
+    lines = ["## Head pose", "",
+             f"From stereo visual odometry on the two views (no loop closure). Solved in {_pct(h['tracked'])} of the "
+             "delivered frames. " + ("The world frame is levelled with the accelerometer: y points along gravity."
+                                     if levelled else "The world frame is the left camera at the first frame of each clip."),
+             "", "| Clip | Frames solved | Breaks | Keyframes | Points agreeing (median) | Reprojection (median) | Path"
+             + (" | Tilt against the accelerometer, median / 95th |" if levelled else " |"),
+             "|---|---|---|---|---|---|---|" + ("---|" if levelled else "")]
+    for name, c in h["clips"].items():
+        tilt = c.get("gravity") or {}
+        lines.append(f"| {name} | {_pct(c.get('tracked'))} | {c.get('breaks')} | {c.get('keyframes')} | "
+                     f"{_num(c.get('inliers_median'))} | {_num(c.get('reprojection_px_median'), ' px')} | "
+                     f"{_num(c.get('path_m'), ' m')} |"
+                     + (f" {_num(tilt.get('tilt_deg_median'), '°')} / {_num(tilt.get('tilt_deg_p95'), '°')} |" if levelled else ""))
+    return lines + [""]
 
 
 def _num(x, unit="") -> str:
@@ -450,6 +481,8 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
     if stereo:
         from .stereo_qc import markdown as stereo_markdown
         lines += stereo_markdown(r["stereo"], r["episodes"])
+    if r.get("head_pose"):
+        lines += head_markdown(r["head_pose"])
     extra = " | In 3D L / R" if stereo else ""
     lines += ["## Source videos", "", f"| Video | Original | Processed | Any hand | Left | Right | Cut L / R{extra} |",
               "|---|---|---|---|---|---|---|" + ("---|" if stereo else "")]
@@ -502,6 +535,11 @@ def to_markdown(r: dict, max_rows: int = 15) -> str:
              "both answers can share the same mistake (the number in brackets is the share of checks passed). "
              "A step renamed with `ego2lerobot relabel` shows where its name came from instead of a number; "
              "the model did not check it.",
+              *(["- *Head pose*: the camera's pose is solved from scene points that are triangulated in a keyframe and "
+                 "followed in the next frames. Errors add up at each new keyframe, so the pose drifts over a long clip; "
+                 "after a break the motion in between is unknown. *Tilt against the accelerometer* is the angle between "
+                 "\"up\" as the pose sees it over half a second and over the whole clip: it shows how far roll and "
+                 "pitch have drifted. It does not see drift in heading or position."] if r.get("head_pose") else []),
               "- *Unusable ranges*: time outside kept episodes (with the reason it was not kept), and stretches inside "
               "episodes where no hand is usable.", ""]
     return "\n".join(lines)

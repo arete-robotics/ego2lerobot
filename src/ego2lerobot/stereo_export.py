@@ -1,5 +1,6 @@
-"""Write stereo episodes as a LeRobot v3 dataset: both camera streams, the calibration, triangulated hands, the IMU
-when given, per-frame triangulation statistics, and preview videos."""
+"""Write stereo episodes as a LeRobot v3 dataset: both camera streams, the calibration, triangulated hands, the head
+pose and the hands in a world frame when given, the IMU when given, per-frame triangulation statistics, and preview
+videos."""
 from __future__ import annotations
 
 import json
@@ -53,9 +54,13 @@ class StereoEpisode:
     task: str
     imu: Imu | None = None
     info: dict = field(default_factory=dict)
+    head: object | None = None  # odometry.HeadPose for the whole source clip
 
 
-def features(width: int, height: int, imu_names=()) -> dict:
+POSE_NAMES = ["x", "y", "z", "r1x", "r1y", "r1z", "r2x", "r2y", "r2z"]
+
+
+def features(width: int, height: int, imu_names=(), head: bool = False) -> dict:
     mono = mono_features(width, height)
     image = mono["observation.images.ego"]
     lens = ["fx", "fy", "cx", "cy", "d0", "d1", "d2", "d3", "d4"]
@@ -75,7 +80,29 @@ def features(width: int, height: int, imu_names=()) -> dict:
     }
     if imu_names:
         out["observation.imu"] = {"dtype": "float32", "shape": (len(imu_names),), "names": list(imu_names)}
+    if head:
+        out["observation.head.pose"] = {"dtype": "float32", "shape": (9,), "names": POSE_NAMES}
+        out["observation.head.valid"] = {"dtype": "float32", "shape": (1,), "names": ["valid"]}
+        out["observation.hands.kp3d_world"] = dict(mono["observation.hands.kp3d"])
+        out["observation.hands.ee_world"] = dict(mono["observation.hands.ee"])
     return out
+
+
+def head_labels(head, labels: StereoLabels, i: int) -> dict:
+    """The head pose of frame i (left camera → world: position and the first two columns of the rotation) and the
+    hands moved into that world frame. While the pose is not solved it is held and `valid` is 0; the world-frame
+    hands are then zeros, as they are for a hand that is not in 3D."""
+    f32 = lambda a: np.asarray(a, np.float32).reshape(-1)  # noqa: E731
+    solved = i < len(head.status) and head.status[i] == 1
+    j = min(i, len(head.status) - 1)
+    world, ee = np.zeros((2, 21, 3)), np.zeros((2, 10))
+    if solved:
+        for s in range(2):
+            if labels.valid[i, s]:
+                world[s] = np.nan_to_num(head.to_world(labels.kp3d[i, s], i))
+                ee[s] = end_effector(world[s])
+    return {"observation.head.pose": f32(head.vector(j)), "observation.head.valid": f32([float(solved)]),
+            "observation.hands.kp3d_world": f32(world), "observation.hands.ee_world": f32(ee)}
 
 
 def frame_labels(labels: StereoLabels, i: int, sx: float, sy: float) -> dict:
@@ -183,10 +210,11 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
     width, height = first.video.size(width)
     fps = round(first.video.fps / step)
     imu_names = first.imu.names if first.imu else []
+    with_head = all(ep.head is not None for ep in episodes)
     out = Path(out)
     if out.exists():
         shutil.rmtree(out)
-    dataset = LeRobotDataset.create(repo_id=repo_id, fps=fps, features=features(width, height, imu_names), root=out,
+    dataset = LeRobotDataset.create(repo_id=repo_id, fps=fps, features=features(width, height, imu_names, with_head), root=out,
                                     robot_type="human_hands", use_videos=True)
     every = max(1, len(episodes) // max(1, previews)) if preview_dir else 0
     meta, stats, parts, imu_slices = [], [], [], []
@@ -210,6 +238,8 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
                    **frame_labels(lab, i, width / lab.width, height / lab.height)}
             if ep.imu:
                 row["observation.imu"] = ep.imu.mean((i - step / 2) / video.fps, (i + step / 2) / video.fps).astype(np.float32)
+            if with_head:
+                row.update(head_labels(ep.head, lab, i))
             rows.append(row)
             kept.append(i)
             if preview:
@@ -235,6 +265,11 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
         meta.append({"episode_index": index, "task": ep.task, "frames": len(rows),
                      "any_hand": round(float(valid.any(1).mean()), 3), "two_hands": round(float(valid.all(1).mean()), 3),
                      "source": source, **ep.info})
+        if with_head:
+            in_range = [i for i in kept if i < len(ep.head.status)]
+            meta[-1]["head_pose"] = {
+                "tracked": round(float((ep.head.status[in_range] == 1).mean()), 3) if in_range else 0.0,
+                "parts": sorted({int(p) for p in ep.head.part[in_range]})}
     dataset.finalize()
     remove_empty_dirs(out / "images")
     meta_dir = out / "meta"
@@ -250,6 +285,19 @@ def write_stereo_dataset(episodes: list[StereoEpisode], out: str | Path, repo_id
         calibration["note"] = "clips have their own calibration; `original` and `stored` are those of the first clip"
         calibration["clips"] = rigs
     (meta_dir / "calibration.json").write_text(json.dumps(calibration, indent=1))
+    if with_head:
+        clips = {}
+        for ep in episodes:
+            clips.setdefault(ep.video.left.name, {**ep.head.summary(), **ep.head.checks})
+        (meta_dir / "head_pose.json").write_text(json.dumps({
+            "about": "observation.head.pose is the pose of the left camera in a world frame that is fixed for one source "
+                     "clip: x y z in metres, then the first two columns of the rotation (left camera → world). It comes "
+                     "from stereo visual odometry without loop closure, so it drifts over a long clip. Where "
+                     "observation.head.valid is 0 the pose is held from the last solved frame. After a break "
+                     "(`breaks`) the motion in between is unknown: poses are comparable only within one part "
+                     "(`head_pose.parts` in episodes_info.json). observation.hands.kp3d_world and ee_world are the "
+                     "hands in that world frame.",
+            "clips": clips}, indent=1))
     (meta_dir / "episodes_info.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False))
     overall = summarize(parts) if parts else {}
     (meta_dir / "triangulation_stats.json").write_text(json.dumps({

@@ -114,7 +114,41 @@ The QC report (`qc_report.md`, `.json`, `.html`) of a stereo dataset adds a *Ste
 
 `--rtmpose` adds RTMPose-m hand keypoints ([rtmlib](https://github.com/Tau-J/rtmlib), `pip install "ego2lerobot[rtmpose]"`) as a second model, fused with MediaPipe per joint. It is off by default: the code is Apache 2.0, but the published weights were trained on hand datasets that include FreiHAND and RHD, whose terms prohibit commercial use.
 
-Stereo limits: the two videos must start on the same frame (frames are paired by index); depth error grows with the square of distance (about 4 mm per pixel of disparity error at 0.5 m with f = 1000 px and a 6 cm baseline); 3D is relative to the head, because camera pose is not estimated; the IMU is passed through, not used. Stereo sub-steps and grasp events have been checked against known motion only on synthetic two-camera scenes; on real stereo video they have so far run only with an assumed calibration, so their accuracy there is not measured.
+Stereo limits: the two videos must start on the same frame (frames are paired by index); depth error grows with the square of distance (about 4 mm per pixel of disparity error at 0.5 m with f = 1000 px and a 6 cm baseline); without `--head-pose`, 3D is relative to the head; the IMU is passed through, and with `--head-pose` its accelerometer is used only to level the world frame. Stereo sub-steps and grasp events have been checked against known motion only on synthetic two-camera scenes; on real stereo video they have so far run only with an assumed calibration, so their accuracy there is not measured.
+
+### Head pose and hands in a world frame
+
+```bash
+ego2lerobot stereo left.mp4 right.mp4 --calib stereo.json --imu imu.csv --head-pose --out my_dataset
+```
+
+`--head-pose` tracks the head by stereo visual odometry and adds four features:
+
+| Key | Shape | Content |
+|---|---|---|
+| `observation.head.pose` | 9 | Left camera in the world frame: x, y, z in metres, then the first two columns of the rotation (camera → world) |
+| `observation.head.valid` | 1 | 1 if the pose was solved in this frame, 0 if it is held from the last solved frame |
+| `observation.hands.kp3d_world` | 126 | The 21 joints of each hand in the world frame (zeros where the hand or the head pose is missing) |
+| `observation.hands.ee_world` | 20 | Wrist position, palm rotation and pinch distance in the world frame |
+
+The world frame is fixed for one source clip. Its origin is the left camera at the first frame. With an IMU file that has `ax`, `ay`, `az` columns, y points along gravity and z is the first viewing direction, levelled. Without one, the axes are those of the left camera at the first frame. If the IMU's axes are not the left camera's, add `"imu_to_camera"` (a 3×3 rotation) to the calibration file. `action` stays in the camera frame.
+
+How it works: corners in the left view of a keyframe are matched to the right view and triangulated. They are followed through the next frames, and each frame's pose is solved from those points (PnP with RANSAC). Hands and the forearm below them are masked. When the view returns near an old keyframe, the pose is solved against that keyframe again, so the error does not add up while the wearer stays in one work area. There is no global optimisation. A two-minute clip takes about half a minute on an Apple silicon Mac.
+
+What we measured, on six clips (13 minutes) of kitchen and laundry work from a public dataset that ships a 200 Hz IMU and its own head pose:
+
+| | This tool | Head pose published with the footage |
+|---|---|---|
+| Rotation over one second against the integrated gyro, median per clip | 0.26° to 0.73° | 0.36° to 1.91° |
+| The same, 90th percentile per clip | 0.5° to 1.6° | 1.2° to 4.1° |
+| Tilt against the accelerometer over the whole clip (1.5 to 3 minutes), median per clip | 0.4° to 2.4° | 0.4° to 2.2° |
+| Frames solved | 100% (one clip with two breaks) | |
+
+There was no independent reference for position. Against the published pose, a point 0.6 m in front of the camera (where the hands are) moved differently by 2 to 18 mm over one second, at the median per clip.
+
+Limits: the pose drifts when the wearer walks on, because nothing corrects it globally. Large moving things that are not hands (a sheet being folded) can pull the pose; the clip with laundry was the worst of the six. After a break the motion in between is unknown, and poses are comparable only within one part (`head_pose.parts` in `meta/episodes_info.json`). The QC report gets a *Head pose* section with frames solved, breaks, keyframes and the tilt check per clip.
+
+**A calibration check comes with it.** The footage above is published as rectified with no lens distortion. Rotations about the two image axes came out 9% to 18% smaller than the gyro's, while rotation about the viewing axis was right. That pattern points to lens distortion left in the pictures. `ego2lerobot.odometry.fit_distortion` measures one radial term from the footage alone: it tracks the head with several candidate values and keeps the one where scene points triangulated in one frame land best in later frames. Six clips gave −0.020 to −0.038 (median −0.030). With that value the rotation ratios rose to 0.92 to 0.97, and the rows of the two views agreed better (90th percentile 1.6 to 2.4 px, from 2.2 to 4.6 px). It refines a pinhole calibration; it does not replace a proper one.
 
 ## Check footage before you label or buy it
 
